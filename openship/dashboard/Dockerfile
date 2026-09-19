@@ -6,6 +6,12 @@ COPY . .
 
 RUN bunx turbo@2.11.1 prune @databuddy/dashboard --docker
 
+FROM pruner AS tracker_builder
+
+# Preserve existing self-hosted tracker URLs using the official tracker source.
+RUN bun install --frozen-lockfile --ignore-scripts
+RUN bun run --cwd packages/tracker build
+
 FROM oven/bun:1.4.1-slim AS builder
 
 WORKDIR /app
@@ -61,6 +67,7 @@ RUN groupadd --system --gid 1001 nodejs \
 COPY --from=builder --chown=nextjs:nodejs /app/apps/dashboard/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/apps/dashboard/.next/static ./apps/dashboard/.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/apps/dashboard/public ./apps/dashboard/public
+COPY --from=tracker_builder --chown=nextjs:nodejs /app/packages/tracker/dist/ ./apps/dashboard/public/
 
 USER nextjs
 
