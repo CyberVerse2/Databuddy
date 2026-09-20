@@ -1,4 +1,4 @@
-import { readBooleanEnv } from "@databuddy/env/boolean";
+import { hasAiProviderKey, readBooleanEnv } from "@databuddy/env/boolean";
 import { getAutumn } from "../lib/autumn-client";
 import { getBillingCustomerId } from "../utils/billing";
 import {
@@ -109,7 +109,7 @@ const appendInvestigationReplyInputSchema = z
 type InsightTimelineItem = z.infer<typeof insightTimelineItemSchema>;
 
 function requireInvestigationAI() {
-	if (readBooleanEnv("SELFHOST") && !process.env.AI_GATEWAY_API_KEY?.trim()) {
+	if (readBooleanEnv("SELFHOST") && !hasAiProviderKey()) {
 		throw rpcError.badRequest(
 			"Ask your administrator to configure AI before continuing an investigation."
 		);
@@ -174,7 +174,7 @@ export async function queueDefinitionChangeRechecks(input: {
 	type: RecheckableDefinitionType;
 	websiteId: string;
 }): Promise<void> {
-	if (readBooleanEnv("SELFHOST") && !process.env.AI_GATEWAY_API_KEY?.trim()) {
+	if (readBooleanEnv("SELFHOST") && !hasAiProviderKey()) {
 		return;
 	}
 	const subjectPrefix = `${input.type}:${input.definitionId}`;

@@ -2,7 +2,7 @@ import "@databuddy/test/env";
 import { describe, expect, it } from "bun:test";
 import {
 	createModelFromId,
-	isAiGatewayConfigured,
+	isAiConfigured,
 } from "@databuddy/ai/config/models";
 import type { BusinessContext } from "@databuddy/ai/lib/business-context";
 import { wrapLanguageModel } from "ai";
@@ -246,7 +246,7 @@ live("live native business selection", () => {
 		},
 	]) {
 		it(fixture.name, async () => {
-			expect(isAiGatewayConfigured).toBe(true);
+			expect(isAiConfigured()).toBe(true);
 			let calls = 0,
 				promptCharacters = 0;
 			const model = wrapLanguageModel({

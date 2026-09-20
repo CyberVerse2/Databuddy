@@ -1,6 +1,6 @@
 import {
 	createModelFromId,
-	isAiGatewayConfigured,
+	isAiConfigured,
 } from "@databuddy/ai/config/models";
 import { getAILogger } from "@databuddy/ai/lib/ai-logger";
 import type { BusinessContext } from "@databuddy/ai/lib/business-context";
@@ -43,7 +43,7 @@ export async function chooseInvestigationSignals(
 ) {
 	const { businessContext, candidates } = input;
 	if (
-		!(model || isAiGatewayConfigured) ||
+		!(model || isAiConfigured()) ||
 		candidates.length <= 1 ||
 		!businessContext.sources.length ||
 		!["ready", "partial"].includes(businessContext.status) ||

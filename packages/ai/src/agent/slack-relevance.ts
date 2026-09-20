@@ -1,6 +1,6 @@
 import { generateObject } from "ai";
 import { z } from "zod";
-import { isAiGatewayConfigured, models } from "../ai/config/models";
+import { isAiConfigured, models } from "../ai/config/models";
 
 const DEFAULT_TIMEOUT_MS = 900;
 const MAX_THREAD_MESSAGES = 30;
@@ -47,7 +47,7 @@ export async function classifySlackThreadReplyRelevance({
 	threadMessages,
 	timeoutMs = DEFAULT_TIMEOUT_MS,
 }: SlackThreadReplyRelevanceInput): Promise<SlackThreadReplyRelevance | null> {
-	if (!isAiGatewayConfigured) {
+	if (!isAiConfigured()) {
 		return null;
 	}
 

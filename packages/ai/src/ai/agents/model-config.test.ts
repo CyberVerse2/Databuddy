@@ -15,7 +15,7 @@ const context = {
 describe("native conversational model configuration", () => {
 	it("routes requested balanced reasoning to the selected provider", () => {
 		const config = createConfig({ ...context, thinking: "low" });
-		expect(config.model.modelId).toBe(modelNames.balanced);
+		expect(config.model.modelId).toBe("gpt-5.6-luna");
 		expect(config.providerOptions).toEqual({
 			openai: { reasoningEffort: "low" },
 		});
@@ -45,7 +45,7 @@ describe("native conversational model configuration", () => {
 			"balanced",
 			modelNames.quick
 		);
-		expect(config.model.modelId).toBe(modelNames.quick);
+		expect(config.model.modelId).toBe("gpt-5.6-luna");
 		expect(config.providerOptions).toBeUndefined();
 		expect(config.system.providerOptions).toBeUndefined();
 		expect(config.temperature).toBe(0.1);

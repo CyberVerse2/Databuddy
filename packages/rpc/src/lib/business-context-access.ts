@@ -1,4 +1,4 @@
-import { readBooleanEnv } from "@databuddy/env/boolean";
+import { hasAiProviderKey, readBooleanEnv } from "@databuddy/env/boolean";
 import { roleHasPermission } from "@databuddy/auth/permissions";
 import { MIN_AGENT_CREDIT_CHECK_BALANCE } from "@databuddy/shared/agent-credits";
 import { z } from "zod";
@@ -34,7 +34,7 @@ export async function businessContextGenerationAccess(
 	}
 	if (
 		!(
-			process.env.AI_GATEWAY_API_KEY?.trim() &&
+			hasAiProviderKey() &&
 			process.env.FIRECRAWL_API_KEY?.trim()
 		) ||
 		(!(readBooleanEnv("SELFHOST") || process.env.AUTUMN_SECRET_KEY?.trim()) &&
