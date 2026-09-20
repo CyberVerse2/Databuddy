@@ -105,7 +105,6 @@ export function createMcpAgentTools(
 Canonical analytics.events schema: client_id, anonymous_id, session_id, time, path, referrer, browser_name, os_name, device_type, country, region, city, utm_source, utm_medium, utm_campaign, utm_term, utm_content, time_on_page, scroll_depth, event_name.
 
 Critical schema footguns: website id column is client_id (not website_id); timestamp is time (not created_at); page URL path is path (not page_path); event discriminator is event_name (not event_type); pageviews are event_name = 'screen_view' (never 'pageview'). Custom events are easy to query incorrectly; use get_data custom_events_* builders instead.`,
-			strict: true,
 			inputSchema: z.object({
 				websiteId: z.string(),
 				sql: z.string(),
@@ -135,7 +134,6 @@ Critical schema footguns: website id column is client_id (not website_id); times
 		get_data: tool({
 			description:
 				"Run 1-10 analytics builders. Use discover_query_types for builder names and required filters. Use preset or from/to; omitted dates default to last_30d in the conversation timezone. Read the returned definition for population and percentage semantics. Supports filters (including trait:<key>), groupBy, and orderBy. Returns a query summary, full rowCount, returnedRows, truncated, and up to 20 data rows. Call list_profile_traits before trait segmentation.",
-			strict: true,
 			inputSchema: agentDataInputSchema,
 			execute: async (args, options) => {
 				const ctx = getToolContext(options);

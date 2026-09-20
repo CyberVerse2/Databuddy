@@ -10,6 +10,7 @@ describe("conversation model compatibility", () => {
 		for (const effort of ["low", "medium", "high"] as const) {
 			const options = conversationModelOptions(modelId, effort);
 			expect(options.providerOptions?.openai).toEqual({
+				strictJsonSchema: false,
 				reasoningEffort: effort,
 			});
 			expect(options.providerOptions?.anthropic).toBeUndefined();
@@ -39,16 +40,21 @@ describe("conversation model compatibility", () => {
 			"openai/synthetic-unknown-model",
 		]) {
 			const options = conversationModelOptions(modelId, "high");
-			expect(options.providerOptions).toBeUndefined();
+			expect(options.providerOptions?.openai).toEqual({
+				strictJsonSchema: false,
+				reasoningEffort: "high",
+			});
 			expect(options.systemProviderOptions).toBeUndefined();
-			expect(options.temperature).toBe(0.1);
+			expect(options.temperature).toBeUndefined();
 		}
 	});
 
 	it("leaves reasoning at provider defaults when effort is absent or off, while retaining valid cache settings", () => {
 		for (const thinking of [undefined, "off"] as const) {
 			const openai = conversationModelOptions(modelNames.balanced, thinking);
-			expect(openai.providerOptions).toBeUndefined();
+			expect(openai.providerOptions).toEqual({
+				openai: { strictJsonSchema: false },
+			});
 			expect(openai.systemProviderOptions).toBeUndefined();
 			expect(openai.temperature).toBe(0.1);
 

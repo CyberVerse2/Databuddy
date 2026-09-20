@@ -73,7 +73,10 @@ describe("shared conversation execution", () => {
 		).toBe("Synthetic answer.");
 		expect(model.doGenerateCalls).toHaveLength(1);
 		const call = model.doGenerateCalls[0];
-		expect(call?.providerOptions?.openai).toEqual({ reasoningEffort: "high" });
+		expect(call?.providerOptions?.openai).toEqual({
+			strictJsonSchema: false,
+			reasoningEffort: "high",
+		});
 		expect(call?.providerOptions?.anthropic).toBeUndefined();
 		expect(call?.temperature).toBeUndefined();
 		expect(

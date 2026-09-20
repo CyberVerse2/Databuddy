@@ -1,6 +1,7 @@
 import {
+	OPENAI_PROVIDER_OPTIONS,
 	createModelFromId,
-	isAiGatewayConfigured,
+	isAiConfigured,
 } from "@databuddy/ai/config/models";
 import { getAILogger } from "@databuddy/ai/lib/ai-logger";
 import type { BusinessContext } from "@databuddy/ai/lib/business-context";
@@ -43,7 +44,7 @@ export async function chooseInvestigationSignals(
 ) {
 	const { businessContext, candidates } = input;
 	if (
-		!(model || isAiGatewayConfigured) ||
+		!(model || isAiConfigured()) ||
 		candidates.length <= 1 ||
 		!businessContext.sources.length ||
 		!["ready", "partial"].includes(businessContext.status) ||
@@ -118,6 +119,7 @@ export async function chooseInvestigationSignals(
 	const modelId = "openai/gpt-5.6-luna";
 	const result = await generateText({
 		model: model ?? getAILogger().wrap(createModelFromId(modelId)),
+		providerOptions: OPENAI_PROVIDER_OPTIONS,
 		maxRetries: 0,
 		maxOutputTokens: 1200,
 		timeout: { totalMs: 15_000 },

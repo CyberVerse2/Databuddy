@@ -1,4 +1,4 @@
-import { readBooleanEnv } from "@databuddy/env/boolean";
+import { hasAiProviderKey, readBooleanEnv } from "@databuddy/env/boolean";
 import {
 	and,
 	db,
@@ -446,7 +446,7 @@ export const organizationsRouter = {
 					isOrganization: Boolean(context.organizationId),
 					canUserUpgrade: false,
 					hasActiveSubscription: false,
-					aiConfigured: Boolean(process.env.AI_GATEWAY_API_KEY?.trim()),
+					aiConfigured: hasAiProviderKey(),
 				};
 			}
 

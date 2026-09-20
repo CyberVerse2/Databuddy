@@ -1,4 +1,4 @@
-import { readBooleanEnv } from "@databuddy/env/boolean";
+import { hasAiProviderKey, readBooleanEnv } from "@databuddy/env/boolean";
 import {
 	and,
 	db,
@@ -982,7 +982,7 @@ async function requireInvestigationsAccess(
 	organizationId: string
 ): Promise<void> {
 	if (readBooleanEnv("SELFHOST")) {
-		if (!process.env.AI_GATEWAY_API_KEY?.trim()) {
+		if (!hasAiProviderKey()) {
 			throw rpcError.badRequest(
 				"Ask your administrator to configure AI before running investigations."
 			);

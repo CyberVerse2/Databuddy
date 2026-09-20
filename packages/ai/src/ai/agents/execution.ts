@@ -1,4 +1,4 @@
-import { readBooleanEnv } from "@databuddy/env/boolean";
+import { hasAiProviderKey, readBooleanEnv } from "@databuddy/env/boolean";
 import type { ApiKeyRow } from "@databuddy/api-keys/resolve";
 import { MIN_AGENT_CREDIT_CHECK_BALANCE } from "@databuddy/shared/agent-credits";
 import { getAutumn } from "@databuddy/rpc/autumn";
@@ -97,7 +97,7 @@ export async function resolveAgentBillingCustomerId(principal: {
 export async function getAgentBillingAccess(
 	billingCustomerId: string | null
 ): Promise<AgentBillingAccess> {
-	if (readBooleanEnv("SELFHOST") && !process.env.AI_GATEWAY_API_KEY?.trim()) {
+	if (readBooleanEnv("SELFHOST") && !hasAiProviderKey()) {
 		throw new Error(
 			"Ask your administrator to configure AI before using Databunny."
 		);

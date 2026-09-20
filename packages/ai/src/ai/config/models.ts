@@ -1,16 +1,11 @@
-import { createGateway } from "ai";
+import { createOpenAI } from "@ai-sdk/openai";
+import { hasAiProviderKey } from "@databuddy/env/boolean";
 
-const apiKey = (process.env.AI_GATEWAY_API_KEY ?? "").trim();
+const DEFAULT_OPENAI_MODEL = "gpt-5.6-luna";
 
-export const isAiGatewayConfigured = apiKey.length > 0;
-
-const gateway = createGateway({
-	apiKey,
-	headers: {
-		"HTTP-Referer": "https://www.databuddy.cc/",
-		"X-Title": "Databuddy",
-	},
-});
+export function isAiConfigured(): boolean {
+	return hasAiProviderKey();
+}
 
 export const modelNames = {
 	tiny: "openai/gpt-oss-120b",
@@ -22,11 +17,40 @@ export const modelNames = {
 export type AgentModelKey = "quick" | "balanced" | "deep";
 export type AgentSource = "dashboard" | "mcp" | "slack";
 
+export function toOpenAiModelId(modelId: string): string {
+	switch (modelId) {
+		case "openai/gpt-5.6-luna":
+		case "gpt-5.6-luna":
+			return "gpt-5.6-luna";
+		case "openai/gpt-5.6-terra":
+		case "gpt-5.6-terra":
+			return "gpt-5.6-terra";
+		case "openai/gpt-5.6-sol":
+		case "gpt-5.6-sol":
+			return "gpt-5.6-sol";
+		default:
+			return DEFAULT_OPENAI_MODEL;
+	}
+}
+
+function openaiClient() {
+	return createOpenAI({
+		apiKey:
+			process.env.OPENAI_API_KEY?.trim() ||
+			process.env.AI_GATEWAY_API_KEY?.trim() ||
+			"",
+	});
+}
+
+export function createModelFromId(modelId: string) {
+	return openaiClient()(toOpenAiModelId(modelId));
+}
+
 export const models = {
-	tiny: gateway.chat(modelNames.tiny),
-	quick: gateway.chat(modelNames.quick),
-	balanced: gateway.chat(modelNames.balanced),
-	deep: gateway.chat(modelNames.deep),
+	tiny: createModelFromId(modelNames.tiny),
+	quick: createModelFromId(modelNames.quick),
+	balanced: createModelFromId(modelNames.balanced),
+	deep: createModelFromId(modelNames.deep),
 } as const;
 
 export const ANTHROPIC_CACHE_1H = {
@@ -35,11 +59,23 @@ export const ANTHROPIC_CACHE_1H = {
 	},
 } as const;
 
-export const AI_MODEL_MAX_RETRIES = 3;
+/** OpenAI defaults to strict tool/output schemas, which reject z.union and optional records. */
+export const OPENAI_PROVIDER_OPTIONS = {
+	openai: { strictJsonSchema: false },
+} as const;
 
-export function createModelFromId(modelId: string) {
-	return gateway.chat(modelId);
+export function openaiProviderOptions(effort?: "low" | "medium" | "high") {
+	return effort
+		? {
+				openai: {
+					strictJsonSchema: false,
+					reasoningEffort: effort,
+				},
+			}
+		: OPENAI_PROVIDER_OPTIONS;
 }
+
+export const AI_MODEL_MAX_RETRIES = 3;
 
 export function getDefaultAgentModelId(_source?: AgentSource): string {
 	return modelNames.balanced;

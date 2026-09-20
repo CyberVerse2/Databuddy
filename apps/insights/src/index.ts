@@ -1,5 +1,5 @@
 import { setAiRequestLoggerProvider } from "@databuddy/ai/lib/request-logger";
-import { isAiGatewayConfigured } from "@databuddy/ai/config/models";
+import { isAiConfigured } from "@databuddy/ai/config/models";
 import { db, shutdownPostgres, sql } from "@databuddy/db";
 import { clickHouse } from "@databuddy/db/clickhouse";
 import { readBooleanEnv } from "@databuddy/env/app";
@@ -134,8 +134,8 @@ async function startRuntime() {
 		worker_enabled: workerEnabled,
 	});
 	if (workerEnabled) {
-		if (!isAiGatewayConfigured) {
-			throw new Error("INSIGHTS_WORKER_ENABLED requires AI_GATEWAY_API_KEY");
+		if (!isAiConfigured()) {
+			throw new Error("INSIGHTS_WORKER_ENABLED requires OPENAI_API_KEY");
 		}
 		const configuredConcurrency = Number.parseInt(
 			process.env.INSIGHTS_WORKER_CONCURRENCY ?? "",
