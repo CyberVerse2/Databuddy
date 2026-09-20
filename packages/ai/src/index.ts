@@ -38,10 +38,12 @@ export {
 export {
 	AI_MODEL_MAX_RETRIES,
 	ANTHROPIC_CACHE_1H,
+	OPENAI_PROVIDER_OPTIONS,
 	createModelFromId,
 	isAiConfigured,
 	modelNames,
 	models,
+	openaiProviderOptions,
 	type AgentModelKey,
 } from "./ai/config/models";
 export { createMcpTools } from "./ai/mcp/tools";

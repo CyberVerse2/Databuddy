@@ -17,7 +17,7 @@ describe("native conversational model configuration", () => {
 		const config = createConfig({ ...context, thinking: "low" });
 		expect(config.model.modelId).toBe("gpt-5.6-luna");
 		expect(config.providerOptions).toEqual({
-			openai: { reasoningEffort: "low" },
+			openai: { strictJsonSchema: false, reasoningEffort: "low" },
 		});
 		expect(config.system.providerOptions).toBeUndefined();
 		expect(config.temperature).toBeUndefined();
@@ -46,8 +46,10 @@ describe("native conversational model configuration", () => {
 			modelNames.quick
 		);
 		expect(config.model.modelId).toBe("gpt-5.6-luna");
-		expect(config.providerOptions).toBeUndefined();
+		expect(config.providerOptions).toEqual({
+			openai: { strictJsonSchema: false, reasoningEffort: "high" },
+		});
 		expect(config.system.providerOptions).toBeUndefined();
-		expect(config.temperature).toBe(0.1);
+		expect(config.temperature).toBeUndefined();
 	});
 });

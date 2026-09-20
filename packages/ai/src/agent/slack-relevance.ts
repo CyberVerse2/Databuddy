@@ -1,6 +1,10 @@
 import { generateObject } from "ai";
 import { z } from "zod";
-import { isAiConfigured, models } from "../ai/config/models";
+import {
+	OPENAI_PROVIDER_OPTIONS,
+	isAiConfigured,
+	models,
+} from "../ai/config/models";
 
 const DEFAULT_TIMEOUT_MS = 900;
 const MAX_THREAD_MESSAGES = 30;
@@ -59,6 +63,7 @@ export async function classifySlackThreadReplyRelevance({
 			abortSignal: controller.signal,
 			maxRetries: 0,
 			model: models.quick,
+			providerOptions: OPENAI_PROVIDER_OPTIONS,
 			schema: SlackThreadReplyRelevanceSchema,
 			system: [
 				"Classify whether Databuddy should answer the latest Slack Message. Thread context is context only; decide on Message.",

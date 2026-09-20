@@ -1,4 +1,5 @@
 import {
+	OPENAI_PROVIDER_OPTIONS,
 	createModelFromId,
 	isAiConfigured,
 } from "@databuddy/ai/config/models";
@@ -118,6 +119,7 @@ export async function chooseInvestigationSignals(
 	const modelId = "openai/gpt-5.6-luna";
 	const result = await generateText({
 		model: model ?? getAILogger().wrap(createModelFromId(modelId)),
+		providerOptions: OPENAI_PROVIDER_OPTIONS,
 		maxRetries: 0,
 		maxOutputTokens: 1200,
 		timeout: { totalMs: 15_000 },

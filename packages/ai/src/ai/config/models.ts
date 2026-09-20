@@ -59,6 +59,22 @@ export const ANTHROPIC_CACHE_1H = {
 	},
 } as const;
 
+/** OpenAI defaults to strict tool/output schemas, which reject z.union and optional records. */
+export const OPENAI_PROVIDER_OPTIONS = {
+	openai: { strictJsonSchema: false },
+} as const;
+
+export function openaiProviderOptions(effort?: "low" | "medium" | "high") {
+	return effort
+		? {
+				openai: {
+					strictJsonSchema: false,
+					reasoningEffort: effort,
+				},
+			}
+		: OPENAI_PROVIDER_OPTIONS;
+}
+
 export const AI_MODEL_MAX_RETRIES = 3;
 
 export function getDefaultAgentModelId(_source?: AgentSource): string {

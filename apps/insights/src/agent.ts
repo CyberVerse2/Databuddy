@@ -8,6 +8,7 @@ import dayjs from "dayjs";
 import { z } from "zod";
 import {
 	AI_MODEL_MAX_RETRIES,
+	OPENAI_PROVIDER_OPTIONS,
 	createModelFromId,
 	isAiConfigured,
 } from "@databuddy/ai/config/models";
@@ -2269,6 +2270,7 @@ export async function runInsightAgent(
 			: (options.model ?? INSIGHTS_MODEL_ID);
 	const agent = new ToolLoopAgent<never, ToolSet>({
 		model: options.model ?? getAILogger().wrap(INSIGHTS_MODEL),
+		providerOptions: OPENAI_PROVIDER_OPTIONS,
 		instructions,
 		tools: {
 			...investigationTools,

@@ -44,7 +44,6 @@ export function createMemoryTools(): Record<string, Tool> {
 		search_memory: tool({
 			description:
 				"Search past conversation memory only when the latest user message explicitly asks about remembered preferences, prior saved context, previous conversations, or what you know/remember about them. Do not use for generic corrections, frustration, acknowledgments, or current Slack thread context.",
-			strict: true,
 			inputSchema: z.object({
 				query: z.string(),
 				limit: z.number().min(1).max(10).optional().default(5),
@@ -78,7 +77,6 @@ export function createMemoryTools(): Record<string, Tool> {
 		save_memory: tool({
 			description:
 				"Save an important user preference, correction, or project fact for future conversations.",
-			strict: true,
 			inputSchema: z.object({
 				content: z.string(),
 				category: z

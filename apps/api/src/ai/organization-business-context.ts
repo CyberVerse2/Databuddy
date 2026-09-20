@@ -5,7 +5,10 @@ import {
 	trackAgentUsage,
 	trackAgentUsageAndBill,
 } from "@databuddy/ai/agents/execution";
-import { createModelFromId } from "@databuddy/ai/config/models";
+import {
+	OPENAI_PROVIDER_OPTIONS,
+	createModelFromId,
+} from "@databuddy/ai/config/models";
 import { getAILogger } from "@databuddy/ai/lib/ai-logger";
 import {
 	createScrapeTools,
@@ -459,6 +462,7 @@ export async function* generateOrganizationBusinessContext(
 			const key = `org-business-context:${input.generationId}:${phase}:${randomUUID()}`;
 			return {
 				model,
+				providerOptions: OPENAI_PROVIDER_OPTIONS,
 				maxRetries: 0,
 				abortSignal: signal,
 				timeout: { totalMs: Math.min(45_000, available()) },
