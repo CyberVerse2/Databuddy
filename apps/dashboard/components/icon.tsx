@@ -1,6 +1,10 @@
 "use client";
 
 import "flag-icons/css/flag-icons.min.css";
+import {
+	AI_ICON_COLORS,
+	aiProductIcon,
+} from "@databuddy/shared/bot-detection/types";
 import Image from "next/image";
 import { cn } from "@/lib/utils";
 
@@ -65,10 +69,25 @@ const OS_ICON_EXT: Record<string, "svg" | "png" | "webp"> = {
 	macOS: "svg",
 };
 
+const AI_ICONS = Object.keys(AI_ICON_COLORS);
+
 const BROWSER_ICONS = Object.keys(BROWSER_ICON_EXT);
 const OS_ICONS = Object.keys(OS_ICON_EXT);
 
-type IconType = "browser" | "os";
+type IconType = "browser" | "os" | "ai";
+
+const ICON_SETS: Record<
+	IconType,
+	{ extensions: Record<string, string>; folder: string; names: string[] }
+> = {
+	browser: {
+		extensions: BROWSER_ICON_EXT,
+		folder: "browsers",
+		names: BROWSER_ICONS,
+	},
+	os: { extensions: OS_ICON_EXT, folder: "operating-systems", names: OS_ICONS },
+	ai: { extensions: {}, folder: "ai", names: AI_ICONS },
+};
 
 interface PublicIconProps {
 	className?: string;
@@ -122,10 +141,9 @@ function getOSMappedName(normalizedName: string): string {
 	return osMap[lowerName] || normalizedName;
 }
 
-function getIconSrc(iconName: string, folder: string): string {
-	const ext =
-		folder === "browsers" ? BROWSER_ICON_EXT[iconName] : OS_ICON_EXT[iconName];
-	return `/${folder}/${iconName}.${ext ?? "svg"}`;
+function getIconSrc(iconName: string, type: IconType): string {
+	const { extensions, folder } = ICON_SETS[type];
+	return `/${folder}/${iconName}.${extensions[iconName] ?? "svg"}`;
 }
 
 function createFallbackIcon(
@@ -160,21 +178,29 @@ function PublicIcon({
 	}
 
 	const normalizedName = normalizeIconName(name);
-	const folder = type === "browser" ? "browsers" : "operating-systems";
-	const availableIcons = type === "browser" ? BROWSER_ICONS : OS_ICONS;
+	const availableIcons = ICON_SETS[type].names;
 
 	let searchName = normalizedName;
 	if (type === "os") {
 		searchName = getOSMappedName(normalizedName);
 	}
 
-	const iconName = findIconMatch(searchName, availableIcons);
+	const ownIconName =
+		type === "ai"
+			? aiProductIcon(name)
+			: findIconMatch(searchName, availableIcons);
+	const aiAppName =
+		type === "browser" && !ownIconName
+			? AI_ICONS.find((icon) => icon.toLowerCase() === searchName.toLowerCase())
+			: undefined;
+	const iconType: IconType = aiAppName ? "ai" : type;
+	const iconName = ownIconName ?? aiAppName;
 
 	if (!iconName) {
 		return fallback || createFallbackIcon(normalizedName, iconSize, className);
 	}
 
-	const iconSrc = getIconSrc(iconName, folder);
+	const iconSrc = getIconSrc(iconName, iconType);
 
 	return (
 		<div
@@ -188,7 +214,12 @@ function PublicIcon({
 		>
 			<Image
 				alt={name}
-				className={cn("object-contain")}
+				className={cn(
+					"object-contain",
+					iconType === "ai" &&
+						AI_ICON_COLORS[iconName] === null &&
+						"dark:invert"
+				)}
 				height={iconSize}
 				key={`${iconName}`}
 				onError={(e) => {
@@ -196,6 +227,7 @@ function PublicIcon({
 					img.style.display = "none";
 				}}
 				src={iconSrc}
+				unoptimized={iconSrc.endsWith(".svg")}
 				width={iconSize}
 			/>
 		</div>
@@ -232,6 +264,31 @@ export function OSIcon({
 			name={name}
 			size={size}
 			type="os"
+		/>
+	);
+}
+
+export function aiProductColor(name: string): string | undefined {
+	const icon = aiProductIcon(name);
+	if (!icon) {
+		return;
+	}
+	return AI_ICON_COLORS[icon] ?? "var(--color-foreground)";
+}
+
+export function AiProductIcon({
+	name,
+	size = "md",
+	className,
+	fallback,
+}: Omit<PublicIconProps, "type">) {
+	return (
+		<PublicIcon
+			className={className}
+			fallback={fallback}
+			name={name}
+			size={size}
+			type="ai"
 		/>
 	);
 }

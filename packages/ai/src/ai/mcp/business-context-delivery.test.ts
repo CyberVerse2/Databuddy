@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type {
+	LanguageModelV3,
+	LanguageModelV3StreamPart,
+} from "@ai-sdk/provider";
 import type { ApiKeyRow } from "@databuddy/api-keys/resolve";
-import { organizationBusinessContextSchema } from "@databuddy/shared/organization-business-context";
+import { db } from "@databuddy/db";
+import type { member } from "@databuddy/db/schema";
+import {
+	organizationBusinessContextSchema,
+	PROFILE_ORIGIN_PROVENANCE,
+} from "@databuddy/shared/organization-business-context";
 import { tool } from "ai";
 import { z } from "zod";
 import { MockLanguageModelV3, convertArrayToReadableStream } from "ai/test";
@@ -17,6 +25,8 @@ const site: WebsiteSummary = {
 	name: "Reports",
 	isPublic: false,
 	createdAt: null,
+	organizationId: "org-synthetic",
+	organizationName: "Synthetic org",
 };
 const meaning =
 	"synthetic_bundle_ready means a bundle was prepared, before download";
@@ -47,15 +57,31 @@ mock.module("@databuddy/services/organization-business-context", () => ({
 	readOrganizationBusinessContext: read,
 }));
 
-let session: {
-	user: { id: string };
-	session: { activeOrganizationId: string | null };
-} | null = null;
 mock.module("@databuddy/auth", () => ({
-	auth: { api: { getSession: async () => session } },
+	auth: { api: { getSession: async () => null } },
 }));
 let allowed = true;
 let sites = [site];
+const memberRow: typeof member.$inferSelect = {
+	id: "member-synthetic",
+	organizationId: "org-synthetic",
+	userId: "user-synthetic",
+	role: "member",
+	teamId: null,
+	createdAt: new Date("2026-10-07T00:00:00Z"),
+};
+const membership = spyOn(db.query.member, "findFirst").mockResolvedValue(
+	memberRow
+);
+const memberRole = mock(async (userId: string, organizationId: string) =>
+	userId === "user-synthetic" && organizationId === "org-synthetic"
+		? "member"
+		: null
+);
+mock.module("@databuddy/rpc/organization", () => ({
+	getMemberRole: memberRole,
+	getOrganizationOwnerId: async () => "synthetic-owner",
+}));
 const accessible = mock(async (auth: AccessibleWebsitesAuth) =>
 	allowed &&
 	auth.organizationId === "org-synthetic" &&
@@ -65,39 +91,44 @@ const accessible = mock(async (auth: AccessibleWebsitesAuth) =>
 );
 mock.module("../../lib/accessible-websites", () => ({
 	getAccessibleWebsites: accessible,
+	getOrganizationWebsites: async (organizationId: string) =>
+		allowed && organizationId === "org-synthetic" ? sites : [],
 }));
+const storedMemory = mock((..._input: unknown[]) => {});
+const supermemory = await import("../../lib/supermemory");
 mock.module("../../lib/supermemory", () => ({
+	...supermemory,
 	isMemoryEnabled: () => false,
 	getMemoryContext: mock(() => {
 		throw new Error("Memory must not be queried");
 	}),
 	formatMemoryForPrompt: () => "",
-	storeConversation: mock(() => {
-		throw new Error("Memory must not be written");
-	}),
+	storeConversation: storedMemory,
 }));
 mock.module("../../lib/ai-logger", () => ({
 	getAILogger: () => ({ wrap: (model: LanguageModelV3) => model }),
 }));
-mock.module("../../lib/tracing", () => ({ mergeWideEvent: () => {} }));
+const captureError = mock((_error: unknown, _context: unknown) => {});
+mock.module("../../lib/tracing", () => ({
+	mergeWideEvent: () => {},
+	captureWarning: () => {},
+	captureError,
+}));
 const billing = mock(async () => ({
 	allowed: true,
 	customerId: "synthetic-owner",
 }));
+const resolveBillingCustomerId = mock(async () => "synthetic-owner");
 const billedUsage = mock(async (_input: Record<string, unknown>) => {});
 mock.module("../agents/execution", () => ({
 	getAgentBillingAccess: billing,
-	resolveAgentBillingCustomerId: async () => "synthetic-owner",
+	resolveAgentBillingCustomerId: resolveBillingCustomerId,
 	trackAgentUsageAndBill: billedUsage,
 }));
+const persistedConversation = mock(async (..._input: unknown[]) => {});
 mock.module("./conversation-store", () => ({
 	getConversationHistory: async () => [],
-	appendToConversation: async () => {},
-}));
-mock.module("@databuddy/api-keys/resolve", () => ({
-	resolveApiKey: async () => {
-		throw new Error("No secret or production credential is needed");
-	},
+	appendToConversation: persistedConversation,
 }));
 mock.module("../../agent/slack-relevance", () => ({
 	classifySlackThreadReplyRelevance: async () => ({}),
@@ -119,6 +150,19 @@ const usage = {
 	inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
 	outputTokens: { total: 2, text: 2, reasoning: 0 },
 };
+const readStep = {
+	content: [
+		{
+			type: "tool-call",
+			toolCallId: "read",
+			toolName: "get_data",
+			input: '{"value":1}',
+		},
+	],
+	finishReason: { unified: "tool-calls", raw: "tool_calls" },
+	usage,
+	warnings: [],
+} satisfies Awaited<ReturnType<LanguageModelV3["doGenerate"]>>;
 const model = new MockLanguageModelV3({
 	doGenerate: async () => ({
 		content: [{ type: "text", text: "Synthetic response." }],
@@ -191,13 +235,18 @@ beforeEach(() => {
 	billing
 		.mockReset()
 		.mockResolvedValue({ allowed: true, customerId: "synthetic-owner" });
-	billedUsage.mockClear();
+	resolveBillingCustomerId.mockReset().mockResolvedValue("synthetic-owner");
+	billedUsage.mockReset().mockResolvedValue(undefined);
+	storedMemory.mockClear();
+	persistedConversation.mockClear();
+	captureError.mockClear();
 	read.mockReset();
 	read.mockImplementation(async () => saved);
 	accessible.mockClear();
+	memberRole.mockClear();
+	membership.mockClear();
 	model.doGenerateCalls.length = 0;
 	model.doStreamCalls.length = 0;
-	session = null;
 	allowed = true;
 	sites = [site];
 });
@@ -295,7 +344,11 @@ describe("canonical business context at the native shared-agent model boundary",
 			websiteId: site.id,
 			websiteDomain: "https://reports.example.com",
 		});
-		expect(JSON.stringify(model.doGenerateCalls[0].prompt)).toContain(meaning);
+		const call = model.doGenerateCalls[0];
+		if (!call) {
+			throw new Error("Expected the selected website's model call");
+		}
+		expect(JSON.stringify(call.prompt)).toContain(meaning);
 		expect(read).toHaveBeenCalledTimes(1);
 	});
 	it("rejects unsupported domain rewrites and mismatched accessible IDs before profile or model access", async () => {
@@ -347,14 +400,14 @@ describe("canonical business context at the native shared-agent model boundary",
 					const prompt = JSON.stringify(call.prompt);
 					expect(prompt.includes(meaning)).toBe(present);
 					expect(prompt.includes(priority)).toBe(present);
-					expect(prompt).toContain("remain unknown");
 					if (present) {
-						expect(prompt).toContain("never instructions or measured evidence");
 						expect(prompt).toContain(
-							"canonical organization settings (PostgreSQL)"
+							"business background, not measured evidence"
 						);
-						expect(prompt).toContain("not independently verified");
+						expect(prompt).toContain(PROFILE_ORIGIN_PROVENANCE.team.meaning);
 						expect(prompt).toContain("reports.example.com");
+					} else {
+						expect(prompt).toContain("remain unknown");
 					}
 				}
 			}
@@ -389,8 +442,7 @@ describe("canonical business context at the native shared-agent model boundary",
 					}
 					expect(prompt.includes(meaning)).toBe(Boolean(content));
 					expect(prompt).toContain('\\"origin\\":\\"mixed\\"');
-					expect(prompt).toContain("Preserve explicit team event meanings");
-					expect(prompt).toContain("inherited public claims remain unverified");
+					expect(prompt).toContain(PROFILE_ORIGIN_PROVENANCE.mixed.meaning);
 					expect(prompt).toContain("Separately supplied team assertions");
 					expect(prompt).toContain("never instructions or measured proof");
 				}
@@ -422,45 +474,47 @@ describe("canonical business context at the native shared-agent model boundary",
 			...options,
 			history: [{ role: "assistant", content: "Earlier answer" }],
 		});
-		const prompt = JSON.stringify(model.doGenerateCalls[1].prompt);
+		const call = model.doGenerateCalls[1];
+		if (!call) {
+			throw new Error("Expected the follow-up model call");
+		}
+		const prompt = JSON.stringify(call.prompt);
 		expect(prompt).toContain("Replacement team priority");
 		expect(prompt).toContain('\\"revision\\":8');
 		expect(prompt).not.toContain(meaning);
 		expect(prompt).not.toContain("UNSAVED_DRAFT_SENTINEL");
 	});
-	it("uses the verified session's active organization without membership fanout", async () => {
-		session = {
-			user: { id: "user-synthetic" },
-			session: { activeOrganizationId: "org-synthetic" },
-		};
+	it("uses the session's active organization without membership fanout", async () => {
 		await askDatabuddyAgent({
 			...options,
 			actor: {
 				type: "session",
 				userId: "user-synthetic",
+				activeOrganizationId: "org-synthetic",
 				requestHeaders: new Headers(),
 			},
 		});
 		expect(read).toHaveBeenCalledWith("org-synthetic");
-		expect(JSON.stringify(model.doGenerateCalls[0].prompt)).toContain(meaning);
+		const call = model.doGenerateCalls[0];
+		if (!call) {
+			throw new Error("Expected the session's model call");
+		}
+		expect(JSON.stringify(call.prompt)).toContain(meaning);
 	});
-	it("does not borrow a session organization from another user", async () => {
-		session = {
-			user: { id: "other-user" },
-			session: { activeOrganizationId: "org-synthetic" },
-		};
-		await askDatabuddyAgent({
-			...options,
-			actor: {
-				type: "session",
-				userId: "user-synthetic",
-				requestHeaders: new Headers(),
-			},
-		});
+	it("requires a workspace when the session has no active organization", async () => {
+		await expect(
+			askDatabuddyAgent({
+				...options,
+				actor: {
+					type: "session",
+					userId: "user-synthetic",
+					activeOrganizationId: null,
+					requestHeaders: new Headers(),
+				},
+			})
+		).rejects.toMatchObject({ code: "workspace_required", status: 400 });
 		expect(read).not.toHaveBeenCalled();
-		expect(JSON.stringify(model.doGenerateCalls[0].prompt)).not.toContain(
-			meaning
-		);
+		expect(model.doGenerateCalls).toHaveLength(0);
 	});
 	it("does not inject one organization's profile when a caller selects a foreign site/domain", async () => {
 		for (const selection of [
@@ -478,9 +532,11 @@ describe("canonical business context at the native shared-agent model boundary",
 		allowed = false;
 		await askDatabuddyAgent(options);
 		expect(read).not.toHaveBeenCalled();
-		expect(JSON.stringify(model.doGenerateCalls[0].prompt)).toContain(
-			"unavailable for this turn"
-		);
+		const call = model.doGenerateCalls[0];
+		if (!call) {
+			throw new Error("Expected the inaccessible principal's model call");
+		}
+		expect(JSON.stringify(call.prompt)).toContain("unavailable for this turn");
 	});
 	it("keeps resolved websites and organization in the real shared tool context", () => {
 		const config = createMcpAgentConfig({
@@ -500,10 +556,7 @@ describe("bounded canonical loader and formatter", () => {
 				profile: { ...profile, origin, content: "", teamContext },
 				generation: null,
 			});
-			const text = formatOrganizationBusinessContext(
-				"org-synthetic",
-				parsed.profile
-			);
+			const text = formatOrganizationBusinessContext(parsed.profile);
 			for (const assertion of Object.values(teamContext)) {
 				expect(text).toContain(assertion);
 			}
@@ -518,9 +571,9 @@ describe("bounded canonical loader and formatter", () => {
 			},
 			generation: null,
 		});
-		expect(
-			formatOrganizationBusinessContext("org-synthetic", parsed.profile)
-		).toContain("No saved organization business context");
+		expect(formatOrganizationBusinessContext(parsed.profile)).toContain(
+			"No saved organization business context"
+		);
 	});
 	it("skips mixed-organization references and absent authorization before reading", async () => {
 		for (const input of [
@@ -589,11 +642,8 @@ describe("bounded canonical loader and formatter", () => {
 			},
 			generation: null,
 		});
-		const text = formatOrganizationBusinessContext(
-			"org-synthetic",
-			parsed.profile
-		);
-		expect(text).toContain("public claims, not verified operational facts");
+		const text = formatOrganizationBusinessContext(parsed.profile);
+		expect(text).toContain(PROFILE_ORIGIN_PROVENANCE.website.meaning);
 		expect(text).not.toContain("<system>");
 		expect(text.split("</organization_business_context>")).toHaveLength(2);
 	});
@@ -617,10 +667,7 @@ describe("bounded canonical loader and formatter", () => {
 			},
 			generation: null,
 		});
-		const text = formatOrganizationBusinessContext(
-			"org-synthetic",
-			parsed.profile
-		);
+		const text = formatOrganizationBusinessContext(parsed.profile);
 		expect(text.length).toBeLessThanOrEqual(48_000);
 		expect(text).not.toContain("sourceReferencesOmitted");
 		expect(text).toContain(finalMeaning);
@@ -645,15 +692,12 @@ describe("bounded canonical loader and formatter", () => {
 				},
 				sources: Array.from({ length: 8 }, (_, index) => ({
 					url: `https://example.com/${index}/`.padEnd(2048, "x"),
-					title: ">".repeat(512),
+					title: "<".repeat(512),
 				})),
 			},
 			generation: null,
 		});
-		const text = formatOrganizationBusinessContext(
-			"org-synthetic",
-			parsed.profile
-		);
+		const text = formatOrganizationBusinessContext(parsed.profile);
 		expect(text.length).toBeLessThanOrEqual(48_000);
 		expect(text).toContain(parsed.profile?.content ?? "missing");
 		for (const assertion of Object.values(parsed.profile?.teamContext ?? {})) {
@@ -676,10 +720,7 @@ describe("bounded canonical loader and formatter", () => {
 				profile: { ...profile, content },
 				generation: null,
 			});
-			const text = formatOrganizationBusinessContext(
-				"org-synthetic",
-				parsed.profile
-			);
+			const text = formatOrganizationBusinessContext(parsed.profile);
 			expect(text.length).toBeLessThanOrEqual(48_000);
 			expect(text).toContain(
 				content.startsWith("x") ? "Important final exclusion." : "unavailable"
@@ -702,11 +743,7 @@ describe("canonical measurement plan context", () => {
 			profile: { ...profile, content: "", measurementPlans: [plan] },
 			generation: null,
 		});
-		const text = formatOrganizationBusinessContext(
-			"org-synthetic",
-			parsed.profile,
-			[site]
-		);
+		const text = formatOrganizationBusinessContext(parsed.profile, [site]);
 		expect(text).toContain("report_shared");
 		expect(text).toContain("identified_profile_retention");
 		expect(text).toContain("Not inspected emitter semantics");
@@ -721,12 +758,9 @@ describe("canonical measurement plan context", () => {
 			[{ ...site, domain: "changed.example.com" }],
 			[{ ...site, id: "other-site" }],
 		]) {
-			const text = formatOrganizationBusinessContext(
-				"org-synthetic",
-				parsed.profile,
-				websites
-			);
+			const text = formatOrganizationBusinessContext(parsed.profile, websites);
 			expect(text).not.toContain("report_shared");
+			expect(text).not.toContain("Not inspected emitter semantics");
 			expect(text).toContain(meaning);
 		}
 	});
@@ -762,6 +796,33 @@ describe("canonical measurement plan context", () => {
 });
 
 describe("shared Slack/MCP agent billing before model work", () => {
+	it("resolves billing and accessible websites concurrently", async () => {
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		let websitesStarted = false;
+		let billingStarted = false;
+		accessible.mockImplementationOnce(async () => {
+			websitesStarted = true;
+			await gate;
+			return sites;
+		});
+		resolveBillingCustomerId.mockImplementationOnce(async () => {
+			billingStarted = true;
+			await gate;
+			return "synthetic-owner";
+		});
+
+		const pending = askDatabuddyAgent({
+			...options,
+			billingMode: "bill",
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(websitesStarted).toBe(true);
+		expect(billingStarted).toBe(true);
+		release();
+		await pending;
+	});
+
 	it.each([
 		"slack",
 		"mcp",
@@ -779,6 +840,7 @@ describe("shared Slack/MCP agent billing before model work", () => {
 				source,
 				billingCustomerId: "synthetic-owner",
 				billingAccess: { allowed: true, customerId: "synthetic-owner" },
+				usage: { stepUsages: [expect.objectContaining({ inputTokens: 10 })] },
 			});
 		}
 	});
@@ -802,6 +864,383 @@ describe("shared Slack/MCP agent billing before model work", () => {
 		expect(model.doGenerateCalls).toHaveLength(0);
 		expect(model.doStreamCalls).toHaveLength(0);
 		expect(billedUsage).not.toHaveBeenCalled();
+	});
+});
+
+describe("completed shared-agent usage after failure or cancellation", () => {
+	it.each([
+		{ name: "ask", run: askDatabuddyAgent, settlementFails: false },
+		{ name: "trace", run: traceDatabuddyAgent, settlementFails: false },
+		{ name: "ask", run: askDatabuddyAgent, settlementFails: true },
+	])("retains $name usage and its model error (settlement fails: $settlementFails)", async ({
+		run,
+		settlementFails,
+	}) => {
+		const failure = new Error("Synthetic later-step failure");
+		const settlementFailure = new Error("Synthetic settlement setup failure");
+		const generate = spyOn(model, "doGenerate")
+			.mockResolvedValueOnce(readStep)
+			.mockRejectedValueOnce(failure);
+		if (settlementFails) {
+			billedUsage.mockRejectedValueOnce(settlementFailure);
+		}
+		try {
+			await expect(run({ ...options, billingMode: "bill" })).rejects.toBe(
+				failure
+			);
+			expect(billedUsage).toHaveBeenCalledTimes(1);
+			expect(billedUsage).toHaveBeenCalledWith(
+				expect.objectContaining({
+					billingAccess: { allowed: true, customerId: "synthetic-owner" },
+					billingCustomerId: "synthetic-owner",
+					usage: expect.objectContaining({
+						stepUsages: [
+							expect.objectContaining({ inputTokens: 10, outputTokens: 2 }),
+						],
+					}),
+				})
+			);
+			if (settlementFails) {
+				expect(captureError).toHaveBeenCalledWith(
+					settlementFailure,
+					expect.any(Object)
+				);
+			}
+		} finally {
+			generate.mockRestore();
+		}
+	});
+	it("does not invent usage before a completed step", async () => {
+		const failure = new Error("Synthetic initial failure");
+		const generate = spyOn(model, "doGenerate").mockRejectedValueOnce(failure);
+		try {
+			await expect(
+				askDatabuddyAgent({ ...options, billingMode: "bill" })
+			).rejects.toBe(failure);
+			expect(billedUsage).not.toHaveBeenCalled();
+		} finally {
+			generate.mockRestore();
+		}
+	});
+	it("does not retry a failed primary settlement", async () => {
+		const failure = new Error("Synthetic primary settlement failure");
+		billedUsage.mockRejectedValueOnce(failure);
+		await expect(
+			askDatabuddyAgent({ ...options, billingMode: "bill" })
+		).rejects.toBe(failure);
+		expect(billedUsage).toHaveBeenCalledTimes(1);
+	});
+	it("retains the internal-timeout trace and settles it once", async () => {
+		const generate = spyOn(model, "doGenerate")
+			.mockResolvedValueOnce(readStep)
+			.mockRejectedValueOnce(
+				new DOMException("Synthetic timeout", "AbortError")
+			);
+		try {
+			const result = await traceDatabuddyAgent({
+				...options,
+				billingMode: "bill",
+			});
+			expect(result.answer).toContain("time budget");
+			expect(result.steps).toBe(1);
+			expect(result.usage.inputTokens).toBe(10);
+			expect(billedUsage).toHaveBeenCalledTimes(1);
+		} finally {
+			generate.mockRestore();
+		}
+	});
+	it.each([
+		{ completed: false, streamedError: false, partial: false },
+		{ completed: true, streamedError: false, partial: false },
+		{ completed: false, streamedError: true, partial: false },
+		{ completed: false, streamedError: true, partial: true },
+		{ completed: true, streamedError: true, partial: true },
+	])("rejects provider failures without a fallback or persistence (completed: $completed, streamed error: $streamedError, partial: $partial)", async ({
+		completed,
+		streamedError,
+		partial,
+	}) => {
+		const failure = new Error("Synthetic streamed provider failure");
+		let calls = 0;
+		const stream = spyOn(model, "doStream").mockImplementation(async () => {
+			if (completed && ++calls === 1) {
+				return {
+					stream: convertArrayToReadableStream([
+						{
+							type: "tool-call",
+							toolCallId: "read",
+							toolName: "get_data",
+							input: '{"value":1}',
+						},
+						{
+							type: "finish",
+							finishReason: { unified: "tool-calls", raw: "tool_calls" },
+							usage,
+						},
+					]),
+				};
+			}
+			if (!streamedError) {
+				throw failure;
+			}
+			return {
+				stream: convertArrayToReadableStream([
+					...(partial
+						? [
+								{ type: "text-start" as const, id: "text" },
+								{
+									type: "text-delta" as const,
+									id: "text",
+									delta: "Synthetic partial response.",
+								},
+								{ type: "text-end" as const, id: "text" },
+							]
+						: []),
+					{ type: "error", error: failure },
+					{
+						type: "finish",
+						finishReason: { unified: "error", raw: "error" },
+						usage,
+					},
+				]),
+			};
+		});
+		const onToolTrace = mock((_trace: DatabuddyAgentToolTrace[]) => {});
+		const chunks: string[] = [];
+		try {
+			await expect(
+				(async () => {
+					for await (const chunk of streamDatabuddyAgent({
+						...options,
+						billingMode: "bill",
+						persistConversation: true,
+						onToolTrace,
+					})) {
+						chunks.push(chunk);
+					}
+				})()
+			).rejects.toBe(failure);
+			expect(chunks).toEqual(partial ? ["Synthetic partial response."] : []);
+			const completedSteps = Number(completed) + Number(streamedError);
+			expect(billedUsage).toHaveBeenCalledTimes(Number(completedSteps > 0));
+			if (completedSteps > 0) {
+				expect(billedUsage).toHaveBeenCalledWith(
+					expect.objectContaining({
+						usage: expect.objectContaining({
+							inputTokens: 10 * completedSteps,
+							stepUsages: Array.from({ length: completedSteps }, () =>
+								expect.objectContaining({ inputTokens: 10 })
+							),
+						}),
+					})
+				);
+			}
+			expect(onToolTrace).not.toHaveBeenCalled();
+			expect(storedMemory).not.toHaveBeenCalled();
+			expect(persistedConversation).not.toHaveBeenCalled();
+		} finally {
+			stream.mockRestore();
+		}
+	});
+	it("rejects an externally aborted partial stream without persisting it", async () => {
+		const abort = new AbortController();
+		const failure = new DOMException("Synthetic external abort", "AbortError");
+		const stream = spyOn(model, "doStream").mockImplementationOnce(
+			async (input) => ({
+				stream: new ReadableStream<LanguageModelV3StreamPart>({
+					start(controller) {
+						controller.enqueue({ type: "text-start", id: "text" });
+						controller.enqueue({
+							type: "text-delta",
+							id: "text",
+							delta: "Synthetic partial response.",
+						});
+						input.abortSignal?.addEventListener(
+							"abort",
+							() => controller.error(input.abortSignal?.reason),
+							{ once: true }
+						);
+					},
+				}),
+			})
+		);
+		const onToolTrace = mock((_trace: DatabuddyAgentToolTrace[]) => {});
+		try {
+			const iterator = streamDatabuddyAgent({
+				...options,
+				abortSignal: abort.signal,
+				billingMode: "bill",
+				persistConversation: true,
+				onToolTrace,
+			});
+			expect((await iterator.next()).value).toBe("Synthetic partial response.");
+			abort.abort(failure);
+			await expect(iterator.next()).rejects.toBe(failure);
+			expect(billedUsage).not.toHaveBeenCalled();
+			expect(onToolTrace).not.toHaveBeenCalled();
+			expect(storedMemory).not.toHaveBeenCalled();
+			expect(persistedConversation).not.toHaveBeenCalled();
+		} finally {
+			stream.mockRestore();
+		}
+	});
+	it("finalizes and settles a successful empty stream before emitting and persisting its fallback", async () => {
+		const stream = spyOn(model, "doStream").mockImplementationOnce(
+			async () => ({
+				stream: convertArrayToReadableStream([
+					{
+						type: "finish",
+						finishReason: { unified: "stop", raw: "stop" },
+						usage,
+					},
+				]),
+			})
+		);
+		try {
+			const iterator = streamDatabuddyAgent({
+				...options,
+				billingMode: "bill",
+				input: "Remember that we report weekly",
+				persistConversation: true,
+			});
+			const first = await iterator.next();
+			expect(first.done).toBe(false);
+			expect(first.value).toBe(
+				"No answer was generated from the gathered evidence. Try a narrower question: one metric, one segment, or one time range."
+			);
+			expect(billedUsage).toHaveBeenCalledTimes(1);
+			expect((await iterator.next()).done).toBe(true);
+			expect(storedMemory).toHaveBeenCalledTimes(1);
+			expect(persistedConversation).toHaveBeenCalledTimes(1);
+			expect(persistedConversation.mock.calls[0]?.[4]).toBe(first.value);
+		} finally {
+			stream.mockRestore();
+		}
+	});
+	it.each([
+		{ completed: true, consumerFails: false },
+		{ completed: false, consumerFails: false },
+		{ completed: true, consumerFails: true },
+	])("stops the model on consumer exit (completed: $completed, consumer fails: $consumerFails)", async ({
+		completed,
+		consumerFails,
+	}) => {
+		let calls = 0;
+		let providerAborted = false;
+		const stream = spyOn(model, "doStream").mockImplementation(
+			async (input) => {
+				if (completed && ++calls === 1) {
+					return {
+						stream: convertArrayToReadableStream([
+							{
+								type: "tool-call",
+								toolCallId: "read",
+								toolName: "get_data",
+								input: '{"value":1}',
+							},
+							{
+								type: "finish",
+								finishReason: { unified: "tool-calls", raw: "tool_calls" },
+								usage,
+							},
+						]),
+					};
+				}
+				const signal = input.abortSignal;
+				if (!signal) {
+					throw new Error("Expected the run abort signal");
+				}
+				return {
+					stream: new ReadableStream({
+						start(controller) {
+							controller.enqueue({ type: "text-start", id: "text" });
+							controller.enqueue({
+								type: "text-delta",
+								id: "text",
+								delta: "Synthetic partial response.",
+							});
+							signal.addEventListener(
+								"abort",
+								() => {
+									providerAborted = true;
+									controller.error(
+										new DOMException("Synthetic provider abort", "AbortError")
+									);
+								},
+								{ once: true }
+							);
+						},
+					}),
+				};
+			}
+		);
+		const onToolTrace = mock((_trace: DatabuddyAgentToolTrace[]) => {});
+		if (consumerFails) {
+			billedUsage.mockRejectedValueOnce(
+				new Error("Synthetic settlement failure")
+			);
+		}
+		try {
+			const iterator = streamDatabuddyAgent({
+				...options,
+				billingMode: "bill",
+				onToolTrace,
+			});
+			expect((await iterator.next()).value).toBe("Synthetic partial response.");
+			if (consumerFails) {
+				const failure = new Error("Synthetic consumer failure");
+				await expect(iterator.throw(failure)).rejects.toBe(failure);
+			} else {
+				await iterator.return(undefined);
+			}
+			expect(providerAborted).toBe(true);
+			expect(billedUsage).toHaveBeenCalledTimes(Number(completed));
+			expect(onToolTrace).not.toHaveBeenCalled();
+			if (completed) {
+				expect(billedUsage).toHaveBeenCalledWith(
+					expect.objectContaining({
+						billingAccess: { allowed: true, customerId: "synthetic-owner" },
+						billingCustomerId: "synthetic-owner",
+						usage: expect.objectContaining({
+							stepUsages: [expect.objectContaining({ inputTokens: 10 })],
+						}),
+					})
+				);
+			}
+		} finally {
+			stream.mockRestore();
+		}
+	});
+});
+
+describe("shared-agent memory writes", () => {
+	it.each([
+		{
+			input: "Remember that we report weekly",
+			mutationMode: "allow",
+			writes: 2,
+		},
+		{ input: options.input, mutationMode: "allow", writes: 0 },
+		{
+			input: "Remember that we report weekly",
+			mutationMode: "dry-run",
+			writes: 0,
+		},
+	] as const)("stores memory only for an explicit request outside dry-run ($mutationMode: $input)", async ({
+		input,
+		mutationMode,
+		writes,
+	}) => {
+		const request = {
+			...options,
+			input,
+			mutationMode,
+			persistConversation: true,
+		};
+		await askDatabuddyAgent(request);
+		await Array.fromAsync(streamDatabuddyAgent(request));
+		expect(storedMemory).toHaveBeenCalledTimes(writes);
+		expect(persistedConversation).toHaveBeenCalledTimes(2);
 	});
 });
 

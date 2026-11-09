@@ -40,15 +40,19 @@ async function withEnv<T>(
 
 describe("dashboard next config", () => {
 	it.each([
-		undefined,
-		"true",
-		"false",
-	])("respects SELFHOST=%s in browser config and signup tracking", async (selfhost) => {
+		[undefined, undefined],
+		["true", undefined],
+		["false", undefined],
+		["true", ""],
+		["true", "   "],
+	])("respects SELFHOST=%s with URL override %j", async (selfhost, url) => {
 		const child = Bun.spawn([process.execPath, "--no-env-file", "-"], {
 			cwd: import.meta.dir,
 			env: {
 				NODE_ENV: "production",
 				SELFHOST: selfhost,
+				NEXT_PUBLIC_API_URL: url,
+				NEXT_PUBLIC_BASKET_URL: url,
 				NEXT_PUBLIC_OPENAI_ADS_PIXEL_ID: "synthetic-pixel",
 			},
 			stdin: new Blob([
@@ -65,6 +69,14 @@ const { publicConfig, isSelfHosted } = await import("@databuddy/env/public");
 assert.equal(isSelfHosted, ${selfhost === "true"});
 assert.equal(publicConfig.urls.api, ${JSON.stringify(selfhost === "true" ? "http://localhost:3001" : "https://api.databuddy.cc")});
 assert.equal(publicConfig.urls.dashboard, ${JSON.stringify(selfhost === "true" ? "http://localhost:3000" : "https://app.databuddy.cc")});
+const headers = await config.headers();
+for (const route of headers) {
+  const csp = route.headers.find(header => header.key === "Content-Security-Policy").value;
+  const connect = csp.split(";").find(part => part.trim().startsWith("connect-src"));
+  for (const origin of ["http://localhost:3001", "http://localhost:4000"]) {
+    assert.equal(connect.split(" ").includes(origin), ${selfhost === "true"});
+  }
+}
 const scripts = [];
 globalThis.window = { location: { hostname: "app.example.com" } };
 globalThis.document = {
@@ -98,6 +110,7 @@ assert.equal(window.oaiq?.q?.some(args => args[0] === "measure") ?? false, ${sel
 				SELFHOST: selfhost,
 				NEXT_PUBLIC_API_URL: "https://api.example.com/prefix",
 				NEXT_PUBLIC_BASKET_URL: "https://events.example.com:8443",
+				STORAGE_ENDPOINT: "https://storage.example.com/bucket",
 			},
 			async () => {
 				for (const source of [
@@ -121,6 +134,7 @@ assert.equal(window.oaiq?.q?.some(args => args[0] === "measure") ?? false, ${sel
 						}
 					}
 					expect(connect).toContain("https://*.databuddy.cc");
+					expect(connectSources).toContain("https://storage.example.com");
 					expect(connect).not.toContain("/prefix");
 					expect(csp).not.toContain("'unsafe-eval'");
 				}

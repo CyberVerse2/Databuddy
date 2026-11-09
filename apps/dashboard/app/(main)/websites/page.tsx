@@ -1,10 +1,11 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { TopBar } from "@/components/layout/top-bar";
 import { useOrganizationsContext } from "@/components/providers/organizations-provider";
-import { useWebsites } from "@/hooks/use-websites";
+import { usePinnedWebsites, useWebsites } from "@/hooks/use-websites";
 import { cn } from "@/lib/utils";
 import { WebsiteCard } from "./_components/website-card";
 import { ArrowClockwiseIcon, GlobeIcon, PlusIcon } from "@databuddy/ui/icons";
@@ -49,6 +50,7 @@ function LoadingSkeleton() {
 
 export default function WebsitesPage() {
 	const [dialogOpen, setDialogOpen] = useState(false);
+	const router = useRouter();
 	const { activeOrganization, isSwitchingOrganization } =
 		useOrganizationsContext();
 	const organizationName = activeOrganization?.name ?? "this organization";
@@ -62,6 +64,8 @@ export default function WebsitesPage() {
 		isFetching,
 		refetch,
 	} = useWebsites();
+	const { sortPinnedFirst } = usePinnedWebsites();
+	const orderedWebsites = sortPinnedFirst(websites);
 
 	return (
 		<div className="flex h-full flex-col">
@@ -88,7 +92,7 @@ export default function WebsitesPage() {
 					size="sm"
 				>
 					<PlusIcon className="size-4" />
-					New Website
+					Add website
 				</Button>
 			</TopBar.Actions>
 
@@ -107,11 +111,11 @@ export default function WebsitesPage() {
 				{!isSwitchingOrganization && isError && (
 					<EmptyState
 						action={{
-							label: "Try Again",
+							label: "Try again",
 							onClick: () => refetch(),
 						}}
 						className="h-full"
-						description="There was an issue fetching your websites. Please check your connection and try again."
+						description="There was an issue fetching your websites. Check your connection and try again."
 						icon={<GlobeIcon />}
 						title="Failed to load your websites"
 						variant="error"
@@ -123,7 +127,7 @@ export default function WebsitesPage() {
 					websites.length === 0 && (
 						<EmptyState
 							action={{
-								label: "Create Your First Website",
+								label: "Add your website",
 								onClick: () => setDialogOpen(true),
 							}}
 							className="h-full"
@@ -141,7 +145,7 @@ export default function WebsitesPage() {
 							aria-live="polite"
 							className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3"
 						>
-							{websites.map((website) => (
+							{orderedWebsites.map((website) => (
 								<WebsiteCard
 									activeUsers={activeUsers?.[website.id]}
 									chartData={chartData?.[website.id]}
@@ -156,6 +160,7 @@ export default function WebsitesPage() {
 
 			<WebsiteDialog
 				onOpenChange={setDialogOpen}
+				onSave={(site) => router.push(`/websites/${site.id}`)}
 				open={dialogOpen && !isSwitchingOrganization}
 			/>
 		</div>

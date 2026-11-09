@@ -1,17 +1,26 @@
 import { createInternalPrincipal } from "@databuddy/rpc";
 import type { ApiScope } from "@databuddy/shared/api-scopes";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import { describe, expect, test } from "bun:test";
+import { MCP_API_SCOPES } from "@databuddy/shared/mcp-access";
+import type {
+	CallToolResult,
+	DiscoverResult,
+	ListToolsResult,
+} from "@modelcontextprotocol/server";
+import { ORPCError } from "@orpc/server";
+import { describe, expect, spyOn, test } from "bun:test";
 import { z } from "zod";
 import {
 	createMcpUnauthorizedResponse,
+	flushMcp,
 	handleDatabuddyMcpRequest,
 } from "../../mcp/http";
+import { createMcpAgentConfig } from "../agents/mcp";
 import { defineMcpTool, type McpRequestContext } from "./define-tool";
-import { resolveMcpDateRange } from "./tool-contracts";
+import {
+	pickFlagFields,
+	resolveMcpDateRange,
+	summarizeConversionAnalytics,
+} from "./tool-contracts";
 import { createMcpTools } from "./tools";
 
 const ctx: McpRequestContext = {
@@ -22,29 +31,334 @@ const ctx: McpRequestContext = {
 
 const tools = createMcpTools(ctx);
 
+function readToolError(result: CallToolResult): unknown {
+	const [content] = result.content;
+	if (!(result.isError && content?.type === "text")) {
+		throw new Error("Expected a text error result");
+	}
+	return (JSON.parse(content.text) as { error: unknown }).error;
+}
+
+interface McpMessage<T> {
+	error?: { code: number; message: string };
+	id?: number | string | null;
+	jsonrpc: "2.0";
+	result?: T;
+}
+
+async function readMcpMessage<T>(response: Response): Promise<McpMessage<T>> {
+	if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+		return response.json() as Promise<McpMessage<T>>;
+	}
+	const data = (await response.text())
+		.split("\n")
+		.filter((line) => line.startsWith("data:"))
+		.at(-1);
+	return JSON.parse(data?.slice(5) ?? "null") as McpMessage<T>;
+}
+
 const TOOL_NAME_RE = /^[a-z][a-z0-9_]*$/;
 const MAX_DESCRIPTION_LEN = 240;
 
 describe("MCP transport", () => {
-	test("keeps API-key authentication separate from unimplemented OAuth", async () => {
+	test("points unauthenticated callers at the protected resource metadata", async () => {
 		const response = createMcpUnauthorizedResponse();
 
 		expect(response.status).toBe(401);
-		expect(response.headers.get("www-authenticate")).not.toContain(
-			"resource_metadata"
+		expect(response.headers.get("www-authenticate")).toContain(
+			'resource_metadata="'
 		);
-		expect(await response.json()).toMatchObject({
-			id: null,
-			jsonrpc: "2.0",
+		expect(response.headers.get("www-authenticate")).toContain(
+			"/.well-known/oauth-protected-resource"
+		);
+		expect(await response.json()).toMatchObject({ error: "invalid_token" });
+	});
+
+	test("stops reading a body without Content-Length once it passes 1 MB", async () => {
+		const chunk = new Uint8Array(65_536);
+		let bytesSent = 0;
+		const response = await handleDatabuddyMcpRequest({
+			apiKey: null,
+			organizationId: "org-1",
+			request: new Request("https://api.databuddy.test/v1/mcp", {
+				body: new ReadableStream<Uint8Array>({
+					pull(controller) {
+						bytesSent += chunk.byteLength;
+						controller.enqueue(chunk);
+					},
+				}),
+				headers: {
+					accept: "application/json, text/event-stream",
+					"content-type": "application/json",
+				},
+				method: "POST",
+			}),
+			requestHeaders: new Headers(),
+			userId: "user-1",
 		});
+
+		expect(response.status).toBe(413);
+		expect(bytesSent).toBeLessThan(2_097_152);
+	});
+
+	test("answers invalid tool arguments with the invalid_input envelope", async () => {
+		const response = await handleDatabuddyMcpRequest({
+			apiKey: null,
+			organizationId: "org-1",
+			request: new Request("https://api.databuddy.test/v1/mcp", {
+				body: JSON.stringify({
+					id: 1,
+					jsonrpc: "2.0",
+					method: "tools/call",
+					params: { arguments: { limit: 5000 }, name: "list_insights" },
+				}),
+				headers: {
+					accept: "application/json, text/event-stream",
+					"content-type": "application/json",
+				},
+				method: "POST",
+			}),
+			requestHeaders: new Headers(),
+			userId: "user-1",
+		});
+		const body = await readMcpMessage<CallToolResult>(response);
+
+		expect(response.status).toBe(200);
+		expect(body.result && readToolError(body.result)).toMatchObject({
+			code: "invalid_input",
+		});
+	});
+
+	test("answers malformed and unknown tool calls with -32602", async () => {
+		const callTool = async (
+			params: unknown,
+			oauth?: McpRequestContext["oauth"]
+		) => {
+			const response = await handleDatabuddyMcpRequest({
+				apiKey: null,
+				oauth,
+				organizationId: "org-1",
+				request: new Request("https://api.databuddy.test/v1/mcp", {
+					body: JSON.stringify({
+						id: 1,
+						jsonrpc: "2.0",
+						method: "tools/call",
+						params,
+					}),
+					headers: {
+						accept: "application/json, text/event-stream",
+						"content-type": "application/json",
+					},
+					method: "POST",
+				}),
+				requestHeaders: new Headers(),
+				userId: oauth ? null : "user-1",
+			});
+			return readMcpMessage<CallToolResult>(response);
+		};
+
+		for (const params of [
+			{ arguments: null, name: "get_investigation" },
+			{ arguments: [], name: "get_investigation" },
+			{ arguments: "x", name: "get_investigation" },
+			{ arguments: {} },
+			{ arguments: {}, name: "no_such_tool" },
+		]) {
+			expect((await callTool(params)).error?.code).toBe(-32_602);
+		}
+		const hidden = await callTool(
+			{ arguments: {}, name: "create_goal" },
+			{
+				grant: { organizationId: "org-1", websiteIds: null },
+				scopes: ["read:data"],
+				user: oauthUser,
+			}
+		);
+		expect(hidden.error?.code).toBe(-32_602);
+		expect(hidden.error?.message).toContain("manage:websites");
+	});
+
+	test("serves 2026-07-28 clients that discover instead of initializing", async () => {
+		const principal = createInternalPrincipal({
+			organizationId: "org-1",
+			scopes: ["read:data"],
+		});
+		const send = async <T>(
+			method: string,
+			params: { arguments?: { limit: number }; name?: string }
+		) => {
+			const response = await handleDatabuddyMcpRequest({
+				apiKey: principal.apiKey,
+				organizationId: "org-1",
+				request: new Request("https://api.databuddy.test/v1/mcp", {
+					body: JSON.stringify({
+						id: 1,
+						jsonrpc: "2.0",
+						method,
+						params: {
+							...params,
+							_meta: {
+								"io.modelcontextprotocol/clientCapabilities": {},
+								"io.modelcontextprotocol/clientInfo": {
+									name: "Vercel-Connex",
+									version: "1.0",
+								},
+								"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+							},
+						},
+					}),
+					headers: {
+						accept: "application/json, text/event-stream",
+						"content-type": "application/json",
+						"mcp-method": method,
+						"mcp-protocol-version": "2026-07-28",
+						...(params.name && { "mcp-name": params.name }),
+					},
+					method: "POST",
+				}),
+				requestHeaders: new Headers(),
+				userId: null,
+			});
+			expect(response.status).toBe(200);
+			return readMcpMessage<T>(response);
+		};
+
+		const discovered = await send<DiscoverResult>("server/discover", {});
+		expect(discovered.error).toBeUndefined();
+		expect(discovered.result).toMatchObject({
+			_meta: { "io.modelcontextprotocol/serverInfo": { name: "databuddy" } },
+			capabilities: { tools: {} },
+			instructions: expect.any(String),
+			supportedVersions: expect.arrayContaining(["2026-07-28"]),
+		});
+
+		const listed = await send<ListToolsResult>("tools/list", {});
+		const names = listed.result?.tools.map(({ name }) => name);
+		expect(names).toContain("list_websites");
+		expect(names).not.toContain("create_goal");
+
+		const called = await send<CallToolResult>("tools/call", {
+			arguments: { limit: 5000 },
+			name: "list_insights",
+		});
+		expect(called.result && readToolError(called.result)).toMatchObject({
+			code: "invalid_input",
+		});
+	});
+
+	test("sends each tool call to basket with the raw error and the OAuth client name", async () => {
+		const original = process.env;
+		process.env = {
+			...original,
+			DATABUDDY_API_KEY: "dbdy_mcp_test",
+			SELFHOST: undefined,
+		};
+		const calls: Record<string, unknown>[] = [];
+		const transport = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: RequestInfo | URL, init?: RequestInit) => {
+					const request = new Request(input, init);
+					if (
+						request.url !== "https://basket.databuddy.cc/mcp" ||
+						request.headers.get("authorization") !== "Bearer dbdy_mcp_test"
+					) {
+						throw new Error("Unexpected external request");
+					}
+					calls.push(...(await request.json()));
+					return new Response(null, { status: 202 });
+				},
+				{ preconnect: fetch.preconnect }
+			)
+		);
+		const callTool = (params: unknown) =>
+			handleDatabuddyMcpRequest({
+				apiKey: null,
+				clientName: "Claude",
+				organizationId: "org-1",
+				request: new Request("https://api.databuddy.test/v1/mcp", {
+					body: JSON.stringify({
+						id: 1,
+						jsonrpc: "2.0",
+						method: "tools/call",
+						params,
+					}),
+					headers: {
+						accept: "application/json, text/event-stream",
+						"content-type": "application/json",
+						"user-agent": "Claude-User",
+					},
+					method: "POST",
+				}),
+				requestHeaders: new Headers(),
+				userId: "user-1",
+			});
+		try {
+			await callTool({ arguments: {}, name: "no_such_tool" });
+			await callTool({ arguments: { limit: 5000 }, name: "list_insights" });
+			await flushMcp();
+
+			expect(calls).toEqual([
+				expect.objectContaining({
+					clientName: "Claude",
+					durationMs: expect.any(Number),
+					error: "Unknown tool: no_such_tool",
+					errorCode: "-32602",
+					serverName: "databuddy",
+					tool: "no_such_tool",
+					userAgent: "Claude-User",
+				}),
+				expect.objectContaining({
+					error: expect.stringContaining('"code":"invalid_input"'),
+					tool: "list_insights",
+				}),
+			]);
+			expect(calls[1]).not.toHaveProperty("errorCode");
+			expect(calls[1]?.outputChars).toBeGreaterThan(0);
+		} finally {
+			transport.mockRestore();
+			process.env = original;
+		}
+	});
+
+	test("lists parameter descriptions but keeps output schemas free of prompt text", async () => {
+		const { tools: listed } = await listTools({
+			apiKey: null,
+			userId: "user-1",
+		});
+		const getInvestigation = listed.find(
+			(tool) => tool.name === "get_investigation"
+		);
+		const undescribed = listed.flatMap((tool) =>
+			Object.entries(tool.inputSchema.properties ?? {})
+				.filter(([, property]) => !property.description)
+				.map(([property]) => `${tool.name}.${property}`)
+		);
+
+		expect(listed.length).toBe(tools.length);
+		expect(undescribed).toEqual([]);
+		expect(getInvestigation?.outputSchema).toBeDefined();
+		expect(JSON.stringify(getInvestigation?.outputSchema)).not.toContain(
+			'"description":"'
+		);
 	});
 });
 
-async function listToolsForPrincipal(
-	principal: ReturnType<typeof createInternalPrincipal>
+const oauthUser = {
+	id: "user",
+	name: "User",
+	email: "user@example.com",
+	emailVerified: true,
+	twoFactorEnabled: false,
+	image: null,
+	createdAt: new Date("2026-01-01"),
+	updatedAt: new Date("2026-01-01"),
+};
+
+async function listTools(
+	context: Pick<McpRequestContext, "apiKey" | "oauth" | "userId">
 ) {
 	const response = await handleDatabuddyMcpRequest({
-		apiKey: principal.apiKey,
+		...context,
 		organizationId: "org-1",
 		request: new Request("https://api.databuddy.test/v1/mcp", {
 			body: JSON.stringify({
@@ -60,20 +374,27 @@ async function listToolsForPrincipal(
 			method: "POST",
 		}),
 		requestHeaders: new Headers(),
-		userId: null,
 	});
-	const body = (await response.json()) as {
-		result?: {
-			tools?: Array<{
-				annotations?: Record<string, boolean>;
-				name: string;
-			}>;
-		};
-	};
+	const body = await readMcpMessage<{
+		tools?: Array<{
+			annotations?: Record<string, boolean>;
+			inputSchema: {
+				properties?: Record<string, { description?: string }>;
+			};
+			name: string;
+			outputSchema?: Record<string, unknown>;
+		}>;
+	}>(response);
 	return {
 		response,
 		tools: body.result?.tools ?? [],
 	};
+}
+
+function listToolsForPrincipal(
+	principal: ReturnType<typeof createInternalPrincipal>
+) {
+	return listTools({ apiKey: principal.apiKey, userId: null });
 }
 
 async function listToolsForScopes(scopes: ApiScope[]) {
@@ -82,57 +403,44 @@ async function listToolsForScopes(scopes: ApiScope[]) {
 	);
 }
 
-describe("MCP tool invariants", () => {
-	test("dynamic analytics output schemas work through the installed MCP SDK", async () => {
-		const dynamicTools = tools.filter((tool) =>
-			["get_funnel_analytics", "get_goal_analytics"].includes(tool.name)
-		);
-		expect(dynamicTools).toHaveLength(2);
-
-		const server = new McpServer({ name: "test", version: "1.0.0" });
-		for (const tool of dynamicTools) {
-			server.registerTool(
-				tool.name,
-				{
-					inputSchema: z.object({}),
-					outputSchema: tool.outputSchema as AnySchema,
-				},
-				() => ({
-					content: [{ type: "text", text: '{"value":"ok"}' }],
-					structuredContent: { value: "ok" },
-				})
-			);
-		}
-
-		const [clientTransport, serverTransport] =
-			InMemoryTransport.createLinkedPair();
-		const client = new Client({ name: "test", version: "1.0.0" });
-		await server.connect(serverTransport);
-		await client.connect(clientTransport);
-
-		try {
-			const listed = await client.listTools();
-			for (const tool of dynamicTools) {
-				expect(
-					listed.tools.find((listedTool) => listedTool.name === tool.name)
-						?.outputSchema
-				).toBeDefined();
-				const result = await client.callTool({
-					arguments: {},
-					name: tool.name,
-				});
-				expect(result).not.toMatchObject({ isError: true });
-				expect(result).toMatchObject({
-					structuredContent: { value: "ok" },
-				});
-			}
-		} finally {
-			await server.close();
-		}
+describe("MCP OAuth scopes", () => {
+	test("a scoped OAuth token lists the same tools as an API key with those scopes", async () => {
+		const scopes: ApiScope[] = ["read:data", "read:links"];
+		const oauth = await listTools({
+			apiKey: null,
+			oauth: {
+				grant: { organizationId: "org-1", websiteIds: null },
+				scopes,
+				user: oauthUser,
+			},
+			userId: null,
+		});
+		const apiKey = await listToolsForScopes(scopes);
+		const names = oauth.tools.map((tool) => tool.name).sort();
+		expect(names).toEqual(apiKey.tools.map((tool) => tool.name).sort());
+		expect(names).toContain("get_data");
+		expect(names).toContain("list_links");
+		expect(names).not.toContain("create_link");
+		expect(oauth.tools.length).toBeLessThan(tools.length);
 	});
 
+	test("an OAuth token without Databuddy scopes lists no data tools", async () => {
+		const oauth = await listTools({
+			apiKey: null,
+			oauth: {
+				grant: { organizationId: "org-1", websiteIds: null },
+				scopes: [],
+				user: oauthUser,
+			},
+			userId: null,
+		});
+		expect(oauth.tools).toEqual([]);
+	});
+});
+
+describe("MCP tool invariants", () => {
 	test("preserves literal string tool arguments", async () => {
-		let received: { enabled: boolean; literal: string } | undefined;
+		const received: { enabled: boolean; literal: string }[] = [];
 		const tool = defineMcpTool(
 			{
 				name: "literal_string_input",
@@ -142,18 +450,18 @@ describe("MCP tool invariants", () => {
 					enabled: z.boolean(),
 					literal: z.string(),
 				}),
+				metadata: { access: { kind: "read" } },
 			},
 			(input) => {
-				received = input;
+				received.push(input);
 				return { ok: true };
 			}
 		).build(ctx);
 
 		for (const literal of ["true", "false", '{"key":"value"}', "[1,2]"]) {
-			received = undefined;
 			const result = await tool.handler({ enabled: true, literal });
 			expect(result).not.toMatchObject({ isError: true });
-			expect(received).toEqual({ enabled: true, literal });
+			expect(received.at(-1)).toEqual({ enabled: true, literal });
 		}
 	});
 
@@ -165,6 +473,7 @@ describe("MCP tool invariants", () => {
 				description:
 					"Test that internal exception text is not returned to callers.",
 				inputSchema: z.object({}),
+				metadata: { access: { kind: "read" } },
 			},
 			() => {
 				throw new Error(sentinel);
@@ -174,6 +483,100 @@ describe("MCP tool invariants", () => {
 		const result = await tool.handler({});
 		expect(result).toMatchObject({ isError: true });
 		expect(JSON.stringify(result)).not.toContain(sentinel);
+	});
+
+	test.each([
+		{ code: "PLAN_LIMIT_EXCEEDED", data: { limit: 3 }, expected: "plan_limit" },
+		{
+			code: "FEATURE_UNAVAILABLE",
+			data: { feature: "funnels" },
+			expected: "plan_limit",
+		},
+		{
+			code: "RATE_LIMITED",
+			data: { retryAfter: 30 },
+			expected: "rate_limited",
+		},
+		{
+			code: "SERVICE_UNAVAILABLE",
+			data: { service: "analytics" },
+			expected: "upstream_timeout",
+		},
+		{ code: "NOT_FOUND", data: { id: "goal-1" }, expected: "not_found" },
+		{ code: "CONFLICT", data: { key: "flag_1" }, expected: "invalid_input" },
+	])("maps ORPC $code to $expected with its message and details", async ({
+		code,
+		data,
+		expected,
+	}) => {
+		const message = `Synthetic ${code} message`;
+		const tool = defineMcpTool(
+			{
+				name: "orpc_error_test",
+				description: "Test that ORPC errors keep their message and details.",
+				inputSchema: z.object({}),
+				metadata: { access: { kind: "read" } },
+			},
+			() => {
+				throw new ORPCError(code, { message, data });
+			}
+		).build(ctx);
+
+		expect(readToolError(await tool.handler({}))).toMatchObject({
+			code: expected,
+			details: data,
+			message,
+		});
+	});
+
+	test("only tells callers to retry upstream timeouts when the tool is idempotent", async () => {
+		const timeoutTool = (
+			name: string,
+			metadata: { access: { kind: "read" | "write" } },
+			annotations?: { destructive: boolean }
+		) =>
+			defineMcpTool(
+				{
+					annotations,
+					description: "Test the retry hint after an upstream timeout.",
+					inputSchema: z.object({}),
+					metadata,
+					name,
+				},
+				() => {
+					throw new ORPCError("SERVICE_UNAVAILABLE", {
+						message: "Upstream timed out",
+					});
+				}
+			).build(ctx);
+
+		expect(
+			readToolError(
+				await timeoutTool("idempotent_timeout", {
+					access: { kind: "read" },
+				}).handler({})
+			)
+		).toMatchObject({
+			code: "upstream_timeout",
+			hint: "Retry the same call shortly.",
+		});
+		expect(
+			readToolError(
+				await timeoutTool(
+					"create_timeout",
+					{ access: { kind: "write" } },
+					{ destructive: false }
+				).handler({})
+			)
+		).toMatchObject({
+			code: "upstream_timeout",
+			hint: expect.stringContaining("The change may already have been saved"),
+		});
+	});
+
+	test("tools use exactly the scopes OAuth discovery advertises", () => {
+		const used = new Set(tools.flatMap((tool) => tool.metadata.access.scopes));
+		expect([...used].sort()).toEqual([...MCP_API_SCOPES].sort());
 	});
 
 	test("create_link matches the HTTP(S) and deep-link app contract", () => {
@@ -293,6 +696,99 @@ describe("MCP tool invariants", () => {
 				86_400_000 +
 				1
 		).toBe(30);
+	});
+
+	test("conversion analytics report the measured window without unmeasured placeholders", () => {
+		const summary = summarizeConversionAnalytics(
+			{
+				avg_completion_time: 0,
+				avg_completion_time_formatted: "—",
+				duration_available: false,
+				error_insights: { available: false, total_errors: 0 },
+				measurement: { startDate: "2026-09-20", endDate: "2026-09-30" },
+				overall_conversion_rate: 12.5,
+				steps_analytics: [
+					{
+						avg_time_to_complete: 0,
+						error_count: 0,
+						step_number: 1,
+						top_errors: [],
+						users: 8,
+					},
+				],
+				time_series: [{ avg_time: 0, date: "2026-09-20", users: 8 }],
+			},
+			{ from: "2026-09-01", to: "2026-09-30" }
+		);
+
+		expect(summary).toEqual({
+			overall_conversion_rate: 12.5,
+			range: { from: "2026-09-20", to: "2026-09-30" },
+			requestedRange: { from: "2026-09-01", to: "2026-09-30" },
+			steps_analytics: [{ step_number: 1, users: 8 }],
+			time_series: [{ date: "2026-09-20", users: 8 }],
+			timeSeriesTruncated: false,
+		});
+	});
+
+	test("flag rules return each target list once and cap long lists", () => {
+		const users = Array.from({ length: 12 }, (_, index) => `u${index}@x.io`);
+		const flag = pickFlagFields({
+			id: "flag-1",
+			rules: [
+				{
+					batch: true,
+					batchValues: users,
+					enabled: true,
+					operator: "in",
+					type: "email",
+					values: users,
+				},
+				{ field: "country", operator: "equals", value: "US" },
+			],
+		});
+
+		expect(flag.rules).toEqual([
+			{
+				batch: true,
+				batchValues: users.slice(0, 10),
+				enabled: true,
+				operator: "in",
+				type: "email",
+				valueCount: 12,
+				valuesTruncated: true,
+			},
+			{ field: "country", operator: "equals", value: "US" },
+		]);
+		expect(
+			pickFlagFields(
+				{ rules: [{ batch: true, batchValues: users }] },
+				["rules"],
+				Number.POSITIVE_INFINITY
+			)
+		).toEqual({ rules: [{ batch: true, batchValues: users }] });
+
+		const [truncatedRule] = flag.rules as unknown[];
+		const fullRule = {
+			batch: true,
+			batchValues: users,
+			enabled: true,
+			operator: "in",
+			type: "email",
+		};
+		for (const name of ["create_flag", "update_flag"]) {
+			const tool = tools.find((candidate) => candidate.name === name);
+			if (!tool) {
+				throw new Error(`${name} tool is not registered`);
+			}
+			const input = { id: "flag-1", key: "flag_1", websiteId: "website-1" };
+			expect(
+				tool.inputSchema.safeParse({ ...input, rules: [truncatedRule] }).success
+			).toBe(false);
+			expect(
+				tool.inputSchema.safeParse({ ...input, rules: [fullRule] }).success
+			).toBe(true);
+		}
 	});
 
 	test("tool names are unique snake_case", () => {
@@ -480,41 +976,36 @@ describe("investigation tools", () => {
 			idempotentHint: true,
 			readOnlyHint: true,
 		});
+		for (const name of ["create_link", "create_goal", "create_flag"]) {
+			expect(byName.get(name)?.annotations).toMatchObject({
+				destructiveHint: false,
+				idempotentHint: false,
+				readOnlyHint: false,
+			});
+		}
 		for (const name of [
-			"create_link",
 			"update_link",
 			"delete_link",
 			"update_goal",
 			"delete_goal",
 			"update_flag",
-			"add_users_to_flag",
 		]) {
 			expect(byName.get(name)?.annotations).toMatchObject({
 				destructiveHint: true,
-				idempotentHint: false,
+				idempotentHint: true,
 				readOnlyHint: false,
 			});
 		}
-	});
-
-	test("rejects unsupported standalone SSE methods", async () => {
-		const principal = createInternalPrincipal({
-			organizationId: "org-1",
-			scopes: ["read:data"],
+		expect(byName.get("add_users_to_flag")?.annotations).toMatchObject({
+			destructiveHint: true,
+			idempotentHint: false,
+			readOnlyHint: false,
 		});
-		const response = await handleDatabuddyMcpRequest({
-			apiKey: principal.apiKey,
-			organizationId: "org-1",
-			request: new Request("https://api.databuddy.test/v1/mcp", {
-				headers: { accept: "text/event-stream" },
-				method: "GET",
-			}),
-			requestHeaders: new Headers(),
-			userId: null,
+		expect(byName.get("reply_to_investigation")?.annotations).toMatchObject({
+			destructiveHint: false,
+			idempotentHint: true,
+			readOnlyHint: false,
 		});
-
-		expect(response.status).toBe(405);
-		expect(response.headers.get("allow")).toBe("POST");
 	});
 
 	test("publishes the investigation lifecycle to a website-scoped key", async () => {
@@ -540,5 +1031,48 @@ describe("investigation tools", () => {
 		]) {
 			expect(names.has(name)).toBe(true);
 		}
+	});
+});
+
+describe("Databunny agent toolset", () => {
+	const createConfig = (mutationMode: "allow" | "dry-run") =>
+		createMcpAgentConfig({
+			apiKey: null,
+			mutationMode,
+			organizationId: "org-1",
+			requestHeaders: new Headers(),
+			source: "slack",
+			userId: "user-1",
+		});
+
+	test("dry-run keeps reads but no write tool or write instruction", () => {
+		const config = createConfig("dry-run");
+		const names = Object.keys(config.tools);
+
+		expect(names).toEqual(
+			expect.arrayContaining([
+				"get_data",
+				"list_goals",
+				"investigations",
+				"configure_investigations",
+			])
+		);
+		expect(
+			names.filter((name) => /^(create|update|delete|add)_/.test(name))
+		).toEqual([]);
+		expect(names).not.toContain("submit_feedback");
+		expect(
+			names.filter((name) => Boolean(config.tools[name]?.needsApproval))
+		).toEqual([]);
+		expect(config.system.content).not.toContain("confirmed=true");
+		expect(config.system.content).not.toContain("channelAction=add");
+		expect(config.system.content).toContain('{"type":"data-table"');
+	});
+
+	test("allow mode keeps write tools for the same Slack source", () => {
+		const names = Object.keys(createConfig("allow").tools);
+
+		expect(names).toContain("create_goal");
+		expect(names).toContain("submit_feedback");
 	});
 });

@@ -26,7 +26,7 @@ let conflict = false;
 let state: OrganizationBusinessContext;
 const originalEnv = {
 	AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
-	FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY,
+	CONTEXT_DEV_API_KEY: process.env.CONTEXT_DEV_API_KEY,
 	AUTUMN_SECRET_KEY: process.env.AUTUMN_SECRET_KEY,
 	NODE_ENV: process.env.NODE_ENV,
 };
@@ -209,7 +209,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
 	process.env.AI_GATEWAY_API_KEY = "synthetic-model-key";
-	process.env.FIRECRAWL_API_KEY = "synthetic-scraper-key";
+	process.env.CONTEXT_DEV_API_KEY = "synthetic-scraper-key";
 	process.env.AUTUMN_SECRET_KEY = "synthetic-native-transport-only";
 	process.env.NODE_ENV = "test";
 	allowed = true;
@@ -689,7 +689,7 @@ test("missing or mismatched billing identities fail closed", async () => {
 
 test.each([
 	"AI_GATEWAY_API_KEY",
-	"FIRECRAWL_API_KEY",
+	"CONTEXT_DEV_API_KEY",
 ])("missing %s disables generation without checking billing", async (key) => {
 	delete process.env[key];
 	expect(await access()).toMatchObject({
@@ -703,7 +703,7 @@ test("unconfigured billing preserves the local billing policy and fails closed i
 	delete process.env.AUTUMN_SECRET_KEY;
 	expect(await access()).toMatchObject({ status: "allowed" });
 	process.env.NODE_ENV = "production";
-	expect(await access()).toMatchObject({ status: "not-configured" });
+	expect(await access()).toMatchObject({ status: "unavailable" });
 	expect(billingRequests).toEqual([]);
 });
 

@@ -38,6 +38,9 @@ const SECRET_VALUE_PATTERNS = [
 export const databuddyEvlogRedactConfig = {
 	paths: [...SECRET_KEY_PATHS],
 	patterns: [...SECRET_VALUE_PATTERNS],
+	// The ipv4 masker cut audit event IPs to their last octet and matched
+	// browser versions like Chrome/140.0.0.0; no other event carries a visitor IP.
+	builtins: ["creditCard", "email", "phone", "jwt", "bearer", "iban"],
 	replacement: "[REDACTED]",
 } satisfies RedactConfig;
 
@@ -67,6 +70,12 @@ export function resolveEvlogEnvironment(
 	);
 }
 
+export function resolveDeployCommit(
+	env: EvlogRuntimeEnv = process.env
+): string | undefined {
+	return env.RAILWAY_GIT_COMMIT_SHA ?? env.UNKEY_GIT_COMMIT_SHA;
+}
+
 export function createDatabuddyEvlogEnv(
 	service: string,
 	env: EvlogRuntimeEnv = process.env
@@ -75,7 +84,7 @@ export function createDatabuddyEvlogEnv(
 		service,
 		environment: resolveEvlogEnvironment(env),
 		region: env.RAILWAY_REPLICA_REGION ?? env.UNKEY_REGION,
-		commitHash: env.RAILWAY_GIT_COMMIT_SHA ?? env.UNKEY_GIT_COMMIT_SHA,
+		commitHash: resolveDeployCommit(env),
 	};
 }
 

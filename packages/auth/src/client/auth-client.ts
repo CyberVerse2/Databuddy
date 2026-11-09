@@ -1,8 +1,7 @@
-import { ssoClient } from "@better-auth/sso/client";
+import { oauthProviderClient } from "@better-auth/oauth-provider/client";
 import {
 	customSessionClient,
 	emailOTPClient,
-	genericOAuthClient,
 	lastLoginMethodClient,
 	magicLinkClient,
 	multiSessionClient,
@@ -15,14 +14,13 @@ import { ac, admin, member, owner } from "../permissions";
 
 export const authClient = createAuthClient({
 	plugins: [
+		oauthProviderClient(),
 		customSessionClient<typeof auth>(),
 		twoFactorClient(),
 		multiSessionClient(),
-		genericOAuthClient(),
 		emailOTPClient(),
 		magicLinkClient(),
 		lastLoginMethodClient(),
-		ssoClient(),
 		organizationClient({
 			ac,
 			roles: {
@@ -34,10 +32,4 @@ export const authClient = createAuthClient({
 	],
 });
 
-const signIn = authClient.signIn;
-const signUp = authClient.signUp;
-const signOut = authClient.signOut;
-const useSession = authClient.useSession;
-const getSession = authClient.getSession;
-
-export { getSession, signIn, signOut, signUp, useSession };
+export const useSession = authClient.useSession;

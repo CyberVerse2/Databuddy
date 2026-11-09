@@ -1,4 +1,3 @@
-import { readBooleanEnv } from "@databuddy/env/boolean";
 import type { GatedFeatureId } from "@databuddy/shared/types/features";
 import {
 	getFeatureUnavailableMessage,
@@ -8,13 +7,14 @@ import {
 	isFeatureAvailable,
 	isWithinLimit,
 } from "@databuddy/shared/types/features";
+import { billingMode } from "@databuddy/env/app";
 import { rpcError } from "../errors";
 
 function requireFeature(
 	planId: string | undefined,
 	feature: GatedFeatureId
 ): void {
-	if (readBooleanEnv("SELFHOST")) {
+	if (billingMode() !== "live") {
 		return;
 	}
 	if (!isFeatureAvailable(planId ?? null, feature)) {
@@ -41,7 +41,7 @@ export function requireUsageWithinLimit(
 	feature: GatedFeatureId,
 	currentUsage: number
 ): void {
-	if (readBooleanEnv("SELFHOST")) {
+	if (billingMode() !== "live") {
 		return;
 	}
 	if (!isWithinLimit(planId ?? null, feature, currentUsage)) {

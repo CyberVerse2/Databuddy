@@ -1,3 +1,4 @@
+import { safeFetch } from "@databuddy/shared/ssrf-guard";
 import { tool } from "ai";
 import { z } from "zod";
 import type { AppMutationMode } from "../config/context";
@@ -6,6 +7,18 @@ import { getAppContext, resolveToolWebsite } from "./utils/context";
 const MAX_CONTENT_CHARS = 12_000;
 const CACHE_TTL_SECONDS = 86_400;
 const TIMEOUT_MS = 10_000;
+const DISCOVERY_TIMEOUT_MS = 5000;
+const DISCOVERY_MAX_BYTES = 2_000_000;
+const DISCOVERY_MAX_PATHS = 200;
+const DISCOVERY_MAX_DOCUMENTS = 6;
+const LINK_LIMIT = 30;
+const FULL_PAGE_LINK_LIMIT = 80;
+const ASSET_PATH =
+	/\.(?:png|jpe?g|gif|svg|webp|avif|ico|css|js|mjs|map|pdf|zip|xml|json|txt|woff2?|ttf|mp4|webm|mp3)$/i;
+const SITEMAP_LOCATION = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
+const ROBOTS_SITEMAP = /^\s*sitemap:\s*(\S+)/gim;
+const MARKDOWN_LINK = /\]\(([^)\s]+)\)/g;
+const SITEMAP_INDEX = /<sitemapindex/i;
 const SCHEME = /^[a-z][a-z\d+.-]*:/i;
 const WWW = /^www\./;
 
@@ -47,12 +60,12 @@ const pageSchema = z.object({
 	fetchedAt: z.iso.datetime({ offset: true }),
 	title: z.string().max(512).nullable(),
 	description: z.string().max(2000).nullable(),
-	statusCode: z.number().int().min(200).max(299).nullable(),
 	content: z
 		.string()
 		.min(1)
 		.max(MAX_CONTENT_CHARS + 20),
-	internalLinks: z.array(z.string().max(2048)).max(30),
+	internalLinks: z.array(z.string().max(2048)).max(FULL_PAGE_LINK_LIMIT),
+	scriptHosts: z.array(z.string().max(253)).max(40).optional(),
 	cached: z.boolean().optional(),
 });
 export type WebsitePageResult =
@@ -60,32 +73,35 @@ export type WebsitePageResult =
 	| { success: false; error: string };
 
 const scrapeSchema = z.object({
-	success: z.literal(true),
-	data: z.object({
-		markdown: z.string().trim().min(1),
-		links: z.array(z.string()).nullish(),
-		metadata: z.object({
-			url: z.string(),
-			sourceURL: z.string().nullish(),
-			title: z.string().nullish(),
-			description: z.string().nullish(),
-			statusCode: z.number().int().min(100).max(599).nullish(),
-			cachedAt: z.iso.datetime({ offset: true }).nullish(),
-			cacheState: z.string().nullish(),
-		}),
+	url: z.string(),
+	markdown: z.object({ data: z.string().trim().min(1) }),
+	parsed: z.object({
+		data: z
+			.object({
+				links: z.array(z.string()).nullish(),
+				scripts: z.array(z.string()).nullish(),
+			})
+			.nullish(),
 	}),
+	metadata: z.object({
+		title: z.string().nullish(),
+		description: z.string().nullish(),
+	}),
+	cache_metadata: z
+		.object({
+			status: z.enum(["hit", "miss", "zdr"]),
+			age_ms: z.number().int().min(0),
+		})
+		.nullish(),
 });
 const searchSchema = z.object({
-	success: z.literal(true),
-	data: z.object({
-		web: z.array(
-			z.object({
-				url: z.string(),
-				title: z.string().nullish(),
-				description: z.string().nullish(),
-			})
-		),
-	}),
+	results: z.array(
+		z.object({
+			url: z.string(),
+			title: z.string().nullish(),
+			description: z.string().nullish(),
+		})
+	),
 });
 
 function siteUrl(value: string, domain: string, base?: string): URL | null {
@@ -129,12 +145,17 @@ const DEFAULT_SCRAPE_CACHE: ScrapeCache = {
 	},
 };
 
+function cacheKey(domain: string, url: URL, fullPageLinks: boolean) {
+	return `scrape${fullPageLinks ? "-full" : ""}:${domain}:${url.pathname}${url.search}`;
+}
+
 async function cachedPage(
 	domain: string,
 	url: URL,
 	asOf: Date,
 	cache: ScrapeCache,
-	signal: AbortSignal
+	signal: AbortSignal,
+	fullPageLinks = false
 ) {
 	if (signal.aborted) {
 		return null;
@@ -146,7 +167,7 @@ async function cachedPage(
 	});
 	try {
 		const raw = await Promise.race([
-			cache.read(`scrape:${domain}:${url.pathname}${url.search}`),
+			cache.read(cacheKey(domain, url, fullPageLinks)),
 			aborted,
 		]);
 		const parsed = pageSchema.safeParse(raw ? JSON.parse(raw) : null);
@@ -182,6 +203,8 @@ export async function readWebsitePage(
 		path?: string;
 		asOf?: Date;
 		freshAfter?: Date;
+		/** Collect links and script hosts from the whole document, not only the main content. */
+		fullPageLinks?: boolean;
 		mutationMode?: AppMutationMode;
 		abortSignal?: AbortSignal;
 	},
@@ -212,15 +235,17 @@ export async function readWebsitePage(
 		AbortSignal.timeout(TIMEOUT_MS),
 		...(input.abortSignal ? [input.abortSignal] : []),
 	]);
+	const fullPageLinks = input.fullPageLinks === true;
 	const cached = await cachedPage(
 		domain.data,
 		url,
 		input.asOf ?? new Date(),
 		cache,
-		signal
+		signal,
+		fullPageLinks
 	);
 	if (signal.aborted) {
-		return { success: false, error: "Page read cancelled or timed out" };
+		return { success: false, error: "Page read canceled or timed out" };
 	}
 	if (
 		cached &&
@@ -235,12 +260,12 @@ export async function readWebsitePage(
 			error: "No cached page is available at the requested reference time",
 		};
 	}
-	const apiKey = process.env.FIRECRAWL_API_KEY;
+	const apiKey = process.env.CONTEXT_DEV_API_KEY;
 	if (!apiKey) {
 		return { success: false, error: "Page scraping is not configured" };
 	}
 	try {
-		const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
+		const res = await fetch("https://api.context.dev/v1/web/scrape", {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -248,10 +273,16 @@ export async function readWebsitePage(
 			},
 			body: JSON.stringify({
 				url: url.href,
-				formats: ["markdown", "links"],
-				onlyMainContent: true,
-				maxAge: 0,
-				timeout: TIMEOUT_MS,
+				formats: { markdown: true, parse: true },
+				sharedParams: { mainContentOnly: !fullPageLinks },
+				parseParams: {
+					rules: {
+						links: { selector: "a", type: "list", output: "@href" },
+						scripts: { selector: "script[src]", type: "list", output: "@src" },
+					},
+				},
+				maxAgeMs: 0,
+				timeoutOpts: { milliseconds: TIMEOUT_MS },
 			}),
 			signal,
 			redirect: "error",
@@ -266,46 +297,58 @@ export async function readWebsitePage(
 				error: "Page returned invalid or incomplete content",
 			};
 		}
-		const { markdown, metadata: meta, links } = parsed.data.data;
-		const finalUrl = siteUrl(meta.url, domain.data);
-		if (
-			!finalUrl ||
-			(meta.sourceURL && !siteUrl(meta.sourceURL, domain.data))
-		) {
+		const {
+			url: providerUrl,
+			markdown,
+			metadata: meta,
+			parsed: parseResult,
+			cache_metadata: providerCache,
+		} = parsed.data;
+		const finalUrl = siteUrl(providerUrl, domain.data);
+		if (!finalUrl) {
 			return {
 				success: false,
 				error: "Page redirected outside the target website",
 			};
 		}
+		const providerAgeMs = providerCache?.age_ms ?? 0;
+		const fetchedAt = new Date(Date.now() - providerAgeMs).toISOString();
 		if (
-			meta.statusCode != null &&
-			(meta.statusCode < 200 || meta.statusCode >= 300)
-		) {
-			return { success: false, error: `Page returned HTTP ${meta.statusCode}` };
-		}
-		const fetchedAt = meta.cachedAt ?? new Date().toISOString();
-		const age = Date.now() - Date.parse(fetchedAt);
-		if (
-			!Number.isFinite(age) ||
-			(meta.cacheState === "hit" && !meta.cachedAt) ||
 			(input.freshAfter &&
 				Date.parse(fetchedAt) < input.freshAfter.getTime()) ||
-			age < 0 ||
-			age >= CACHE_TTL_SECONDS * 1000
+			providerAgeMs >= CACHE_TTL_SECONDS * 1000
 		) {
 			return {
 				success: false,
-				error: "Provider returned stale or undated cached content",
+				error: "Provider returned stale cached content",
 			};
 		}
 		const internalLinks = new Set<string>();
-		for (const link of links ?? []) {
+		const linkLimit = fullPageLinks ? FULL_PAGE_LINK_LIMIT : LINK_LIMIT;
+		for (const link of parseResult.data?.links ?? []) {
 			const internal = siteUrl(link, domain.data, finalUrl.href);
 			const path = internal ? `${internal.pathname}${internal.search}` : null;
 			if (path && path.length <= 2048) {
 				internalLinks.add(path);
 			}
-			if (internalLinks.size >= 30) {
+			if (internalLinks.size >= linkLimit) {
+				break;
+			}
+		}
+		const scriptHosts = new Set<string>();
+		for (const script of parseResult.data?.scripts ?? []) {
+			if (!URL.canParse(script, finalUrl.href)) {
+				continue;
+			}
+			const host = new URL(script, finalUrl.href).hostname.toLowerCase();
+			if (
+				host &&
+				host.length <= 253 &&
+				!siteUrl(`https://${host}/`, domain.data)
+			) {
+				scriptHosts.add(host);
+			}
+			if (scriptHosts.size >= 40) {
 				break;
 			}
 		}
@@ -317,19 +360,19 @@ export async function readWebsitePage(
 			fetchedAt,
 			title: meta.title?.slice(0, 512) ?? null,
 			description: meta.description?.slice(0, 2000) ?? null,
-			statusCode: meta.statusCode ?? null,
 			content:
-				markdown.length > MAX_CONTENT_CHARS
-					? `${markdown.slice(0, MAX_CONTENT_CHARS)}\n…[truncated]`
-					: markdown,
+				markdown.data.length > MAX_CONTENT_CHARS
+					? `${markdown.data.slice(0, MAX_CONTENT_CHARS)}\n…[truncated]`
+					: markdown.data,
 			internalLinks: [...internalLinks],
+			scriptHosts: [...scriptHosts],
 		};
 		if (signal.aborted) {
-			return { success: false, error: "Page read cancelled or timed out" };
+			return { success: false, error: "Page read canceled or timed out" };
 		}
 		if (input.mutationMode !== "dry-run") {
 			cache.write(
-				`scrape:${domain.data}:${url.pathname}${url.search}`,
+				cacheKey(domain.data, url, fullPageLinks),
 				JSON.stringify(result)
 			);
 		}
@@ -338,10 +381,116 @@ export async function readWebsitePage(
 		return {
 			success: false,
 			error: signal.aborted
-				? "Page read cancelled or timed out"
+				? "Page read canceled or timed out"
 				: "Page read failed",
 		};
 	}
+}
+
+async function readPublicText(
+	url: string,
+	signal: AbortSignal
+): Promise<string | null> {
+	try {
+		const response = await safeFetch(url, {
+			signal,
+			timeoutMs: DISCOVERY_TIMEOUT_MS,
+			maxRedirects: 2,
+			headers: { Accept: "text/plain, application/xml, text/xml, */*" },
+		});
+		if (!response.ok) {
+			return null;
+		}
+		const length = Number(response.headers.get("content-length") ?? 0);
+		if (length > DISCOVERY_MAX_BYTES) {
+			return null;
+		}
+		const text = await response.text();
+		return text.length > DISCOVERY_MAX_BYTES ? null : text;
+	} catch {
+		return null;
+	}
+}
+
+export interface SiteDiscovery {
+	llmsTxt: boolean;
+	paths: string[];
+	sitemaps: number;
+}
+
+/**
+ * Lists same-site paths from robots.txt sitemaps, sitemap.xml and llms.txt so
+ * research can pick pages the homepage never links to. Paths are hints only.
+ */
+export async function discoverSitePaths(input: {
+	domain: string;
+	abortSignal?: AbortSignal;
+}): Promise<SiteDiscovery> {
+	const domain = domainSchema.safeParse(input.domain);
+	const discovery: SiteDiscovery = { llmsTxt: false, paths: [], sitemaps: 0 };
+	if (!domain.success) {
+		return discovery;
+	}
+	const signal = AbortSignal.any([
+		AbortSignal.timeout(DISCOVERY_TIMEOUT_MS * 3),
+		...(input.abortSignal ? [input.abortSignal] : []),
+	]);
+	const base = `https://${domain.data}/`;
+	const paths = new Set<string>();
+	const add = (value: string) => {
+		const url = siteUrl(value, domain.data, base);
+		if (!url || url.search || ASSET_PATH.test(url.pathname)) {
+			return;
+		}
+		if (paths.size < DISCOVERY_MAX_PATHS) {
+			paths.add(url.pathname);
+		}
+	};
+	const sitemapUrls = new Set<string>([`${base}sitemap.xml`]);
+	const [robots, llms] = await Promise.all([
+		readPublicText(`${base}robots.txt`, signal),
+		readPublicText(`${base}llms.txt`, signal),
+	]);
+	for (const match of robots?.matchAll(ROBOTS_SITEMAP) ?? []) {
+		const url = siteUrl(match[1] ?? "", domain.data, base);
+		if (url && sitemapUrls.size < 3) {
+			sitemapUrls.add(url.href);
+		}
+	}
+	if (llms) {
+		discovery.llmsTxt = true;
+		for (const match of llms.matchAll(MARKDOWN_LINK)) {
+			add(match[1] ?? "");
+		}
+	}
+	let documents = 0;
+	const queue = [...sitemapUrls];
+	while (queue.length && documents < DISCOVERY_MAX_DOCUMENTS) {
+		const sitemapUrl = queue.shift();
+		if (!sitemapUrl) {
+			break;
+		}
+		documents += 1;
+		const xml = await readPublicText(sitemapUrl, signal);
+		if (!xml) {
+			continue;
+		}
+		discovery.sitemaps += 1;
+		const isIndex = SITEMAP_INDEX.test(xml);
+		for (const match of xml.matchAll(SITEMAP_LOCATION)) {
+			const location = match[1] ?? "";
+			if (isIndex) {
+				const child = siteUrl(location, domain.data, base);
+				if (child && queue.length + documents < DISCOVERY_MAX_DOCUMENTS) {
+					queue.push(child.href);
+				}
+			} else {
+				add(location);
+			}
+		}
+	}
+	discovery.paths = [...paths];
+	return discovery;
 }
 
 export function createScrapeTools(cache: ScrapeCache = DEFAULT_SCRAPE_CACHE) {
@@ -410,7 +559,7 @@ export function createScrapeTools(cache: ScrapeCache = DEFAULT_SCRAPE_CACHE) {
 						error: "Could not resolve a domain for the target website",
 					};
 				}
-				const apiKey = process.env.FIRECRAWL_API_KEY;
+				const apiKey = process.env.CONTEXT_DEV_API_KEY;
 				if (!apiKey) {
 					return { success: false, error: "Website search is not configured" };
 				}
@@ -420,7 +569,7 @@ export function createScrapeTools(cache: ScrapeCache = DEFAULT_SCRAPE_CACHE) {
 				]);
 				try {
 					signal.throwIfAborted();
-					const res = await fetch("https://api.firecrawl.dev/v2/search", {
+					const res = await fetch("https://api.context.dev/v1/web/search", {
 						method: "POST",
 						headers: {
 							"Content-Type": "application/json",
@@ -429,9 +578,8 @@ export function createScrapeTools(cache: ScrapeCache = DEFAULT_SCRAPE_CACHE) {
 						body: JSON.stringify({
 							query,
 							includeDomains: [domain.data],
-							sources: ["web"],
-							limit: 5,
-							timeout: TIMEOUT_MS,
+							numResults: 10,
+							timeoutOpts: { milliseconds: TIMEOUT_MS },
 						}),
 						signal,
 						redirect: "error",
@@ -450,7 +598,7 @@ export function createScrapeTools(cache: ScrapeCache = DEFAULT_SCRAPE_CACHE) {
 						};
 					}
 					const seen = new Set<string>();
-					const results = parsed.data.data.web.flatMap((item) => {
+					const results = parsed.data.results.flatMap((item) => {
 						const url = siteUrl(item.url, domain.data);
 						if (!url || seen.has(url.href) || seen.size === 5) {
 							return [];
@@ -476,7 +624,7 @@ export function createScrapeTools(cache: ScrapeCache = DEFAULT_SCRAPE_CACHE) {
 					return {
 						success: false,
 						error: signal.aborted
-							? "Website search cancelled or timed out"
+							? "Website search canceled or timed out"
 							: "Website search failed",
 					};
 				}

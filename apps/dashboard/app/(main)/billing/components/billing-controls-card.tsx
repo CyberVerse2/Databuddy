@@ -11,6 +11,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useCustomer } from "autumn-js/react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { getUserFacingErrorMessage } from "@/lib/user-facing-error";
 import {
 	BellIcon,
 	GearIcon,
@@ -27,9 +28,8 @@ import {
 	Text,
 } from "@databuddy/ui";
 import { Switch } from "@databuddy/ui/client";
+import { FEATURE_IDS } from "@databuddy/shared/types/features";
 import { cn } from "@/lib/utils";
-
-const EVENTS_FEATURE_ID = "events";
 
 const TOPUP_DEFAULTS = { threshold: 100, quantity: 1000 };
 const TOPUP_LIMITS = {
@@ -60,7 +60,7 @@ export function BillingControlsCard() {
 	const alert = useMemo(() => {
 		const e = customer?.billingControls?.usageAlerts?.find(
 			(a) =>
-				a.featureId === EVENTS_FEATURE_ID &&
+				a.featureId === FEATURE_IDS.EVENTS &&
 				a.thresholdType === "usage_percentage"
 		);
 		return e ? { enabled: e.enabled, threshold: e.threshold } : null;
@@ -77,7 +77,7 @@ export function BillingControlsCard() {
 
 	if (!customer) {
 		return (
-			<Card>
+			<Card id="billing-controls">
 				<Card.Content>
 					{isLoading ? (
 						<Skeleton className="h-32" />
@@ -92,7 +92,7 @@ export function BillingControlsCard() {
 	}
 
 	return (
-		<Card>
+		<Card id="billing-controls">
 			<Card.Header>
 				<Card.Title className="flex items-center gap-2 text-balance">
 					<GearIcon className="text-muted-foreground" size={14} />
@@ -111,9 +111,9 @@ export function BillingControlsCard() {
 							initial={topup}
 							limits={TOPUP_LIMITS}
 							messages={{
-								error: "Failed to update auto top-up.",
-								successDisable: "Auto top-up turned off.",
-								successEnable: "Auto top-up enabled.",
+								error: "Failed to update auto top-up. Try again.",
+								successDisable: "Auto top-up turned off",
+								successEnable: "Auto top-up enabled",
 							}}
 							onSave={(input) => orpc.billing.setAutoTopup.call(input)}
 							onSaved={refetch}
@@ -162,9 +162,9 @@ export function BillingControlsCard() {
 					initial={alert}
 					limits={ALERT_LIMITS}
 					messages={{
-						error: "Failed to update usage alert.",
-						successDisable: "Usage alert turned off.",
-						successEnable: "Usage alert enabled.",
+						error: "Failed to update usage alert. Try again.",
+						successDisable: "Usage alert turned off",
+						successEnable: "Usage alert enabled",
 					}}
 					onSave={(input) => orpc.billing.setUsageAlert.call(input)}
 					onSaved={refetch}
@@ -197,9 +197,9 @@ export function BillingControlsCard() {
 							initial={spend}
 							limits={USAGE_LIMITS}
 							messages={{
-								error: "Failed to update usage limit.",
-								successDisable: "Usage limit removed.",
-								successEnable: "Usage limit set.",
+								error: "Failed to update usage limit. Try again.",
+								successDisable: "Usage limit removed",
+								successEnable: "Usage limit set",
 							}}
 							onSave={(input) =>
 								orpc.billing.setSpendLimit.call({
@@ -292,7 +292,10 @@ function BillingRow<TForm extends FormShape>({
 		setFormState(initialForm);
 	}, [wasEnabled, initialForm]);
 
-	const mutation = useMutation({ mutationFn: onSave });
+	const mutation = useMutation({
+		mutationFn: onSave,
+		meta: { suppressGlobalErrorToast: true },
+	});
 	const setForm = (patch: Partial<TForm>) =>
 		setFormState((f) => ({ ...f, ...patch }));
 
@@ -364,7 +367,7 @@ function BillingRow<TForm extends FormShape>({
 
 			{mutation.isError && (
 				<p className="text-pretty pt-3 text-destructive text-sm" role="alert">
-					{mutation.error.message || messages.error}
+					{getUserFacingErrorMessage(mutation.error, messages.error)}
 				</p>
 			)}
 			{dirty && (

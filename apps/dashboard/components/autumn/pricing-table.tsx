@@ -5,7 +5,6 @@ import {
 	FEATURE_METADATA,
 	GATED_FEATURES,
 	HIDDEN_PRICING_FEATURES,
-	INTELLIGENCE_CONTACT_TOPICS,
 	normalizePlanId,
 	PLAN_FEATURE_LIMITS,
 } from "@databuddy/shared/types/features";
@@ -19,7 +18,7 @@ import {
 } from "@databuddy/ui/icons";
 import { Accordion } from "@databuddy/ui/client";
 import { useCustomer, useListPlans } from "autumn-js/react";
-import { useState } from "react";
+import { type ComponentProps, useState } from "react";
 import { toast } from "sonner";
 import { PricingTiersTooltip } from "@/app/(main)/billing/components/pricing-tiers-tooltip";
 import { getStripeMetadata } from "@/app/(main)/billing/utils/stripe-metadata";
@@ -36,16 +35,14 @@ import {
 } from "@/components/ui/table";
 import { getCustomerPlanName } from "@/lib/autumn/customer-plan-name";
 import { formatLocaleNumber } from "@/lib/format-locale-number";
-import { getUserFacingErrorMessage } from "@/lib/user-facing-error";
+import { showErrorToast } from "@/lib/user-facing-error";
 import { cn } from "@/lib/utils";
 
 type HookPlan = NonNullable<ReturnType<typeof useListPlans>["data"]>[number];
 type BillingItem = HookPlan["items"][number];
 type BillingPreview = AttachDialogProps["preview"];
 
-const CONTACT_TOPICS: Record<string, string | undefined> =
-	INTELLIGENCE_CONTACT_TOPICS;
-const DISPLAYED_PLAN_IDS = [
+export const DISPLAYED_PLAN_IDS = [
 	"intelligence_scale",
 	"intelligence",
 	"pro",
@@ -58,9 +55,10 @@ const PLAN_ICONS: Record<string, typeof CrownIcon> = {
 	intelligence: CrownIcon,
 	intelligence_scale: CrownIcon,
 };
-const PLAN_TAGLINES: Record<string, string | undefined> = Object.fromEntries(
-	Object.entries(PLAN_COPY).map(([id, copy]) => [id, copy.description])
-);
+export const PLAN_TAGLINES: Record<string, string | undefined> =
+	Object.fromEntries(
+		Object.entries(PLAN_COPY).map(([id, copy]) => [id, copy.description])
+	);
 const PLAN_SUPPORT: Record<string, string> = {
 	hobby: "Email support",
 	pro: "Priority email support",
@@ -68,11 +66,11 @@ const PLAN_SUPPORT: Record<string, string> = {
 	intelligence_scale: "Priority email + Slack",
 };
 
-function formatPriceAmount(amount: number) {
+export function formatPriceAmount(amount: number) {
 	return `$${amount.toLocaleString("en-US", { maximumFractionDigits: 6 })}`;
 }
 
-function allowanceText(item: BillingItem, unit: string) {
+export function allowanceText(item: BillingItem, unit: string) {
 	const quantity = item.unlimited
 		? "Unlimited"
 		: formatLocaleNumber(item.included ?? 0);
@@ -118,8 +116,7 @@ export default function PricingTable({
 }: {
 	selectedPlan?: string | null;
 }) {
-	const { attach, previewAttach } = useCustomer();
-	const { data: plans, isLoading, error } = useListPlans();
+	const { data: plans, isLoading, error, refetch } = useListPlans();
 
 	if (isLoading) {
 		return (
@@ -150,9 +147,10 @@ export default function PricingTable({
 	if (error) {
 		return (
 			<EmptyState
+				action={{ label: "Try again", onClick: () => refetch() }}
 				description="Try again in a moment."
 				icon={<WarningIcon />}
-				title="Couldn't load plans"
+				title="Failed to load plans"
 				variant="error"
 			/>
 		);
@@ -168,32 +166,9 @@ export default function PricingTable({
 			<div className="motion-safe:fade-in motion-safe:slide-in-from-bottom-1 grid items-stretch gap-4 motion-safe:animate-in motion-safe:duration-150 sm:grid-cols-2 xl:grid-cols-4">
 				{displayedPlans.map((plan) => (
 					<PricingCard
-						attachAction={async () => {
-							try {
-								const result = await attach({
-									planId: plan.id,
-									metadata: getStripeMetadata(),
-									successUrl: `${window.location.origin}/billing`,
-								});
-								if (result?.paymentUrl) {
-									window.location.href = result.paymentUrl;
-								} else {
-									toast.success("Plan updated");
-								}
-							} catch (error) {
-								toast.error(
-									getUserFacingErrorMessage(
-										error,
-										"We couldn't update your plan. Try again."
-									)
-								);
-								throw error;
-							}
-						}}
 						isSelected={selectedPlan === plan.id}
 						key={plan.id}
 						plan={plan}
-						previewAction={() => previewAttach({ planId: plan.id })}
 					/>
 				))}
 			</div>
@@ -216,23 +191,12 @@ export default function PricingTable({
 
 function PricingCard({
 	plan,
-	attachAction,
-	previewAction,
 	isSelected,
 }: {
 	plan: HookPlan;
-	attachAction: () => Promise<void>;
-	previewAction: () => Promise<BillingPreview>;
 	isSelected: boolean;
 }) {
-	const [isLoadingPreview, setIsLoadingPreview] = useState(false);
-	const [preview, setPreview] = useState<BillingPreview | null>(null);
-	const [dialogOpen, setDialogOpen] = useState(false);
-	const eligibility = plan.customerEligibility;
-	const isActive = eligibility?.status === "active";
-	const planName = getCustomerPlanName(plan.id, plan.name);
-	const investigationTerms = getInvestigationTerms(plan.items);
-	const contactTopic = CONTACT_TOPICS[plan.id];
+	const isActive = plan.customerEligibility?.status === "active";
 	const isRecommended = plan.id === RECOMMENDED_PLAN_ID;
 	const Icon = PLAN_ICONS[plan.id] ?? CrownIcon;
 
@@ -269,21 +233,16 @@ function PricingCard({
 				<div className="min-w-0 flex-1">
 					<div className="flex flex-wrap items-center gap-2">
 						<Card.Title className="text-balance text-base">
-							{planName}
+							{getCustomerPlanName(plan.id, plan.name)}
 						</Card.Title>
 						{isActive && (
 							<Badge size="sm" variant="muted">
-								Current
+								Current plan
 							</Badge>
 						)}
 						{isSelected && !isActive && (
 							<Badge size="sm" variant="primary">
 								Selected
-							</Badge>
-						)}
-						{contactTopic && !isActive && (
-							<Badge size="sm" variant="muted">
-								Invite only
 							</Badge>
 						)}
 					</div>
@@ -298,53 +257,71 @@ function PricingCard({
 			<Card.Content className="flex flex-1 flex-col gap-5 p-5">
 				<PricingFeatures plan={plan} />
 				<div className="mt-auto space-y-3">
-					{contactTopic && !isActive ? (
-						<Button asChild className="w-full" size="lg" variant="secondary">
-							<a
-								href={`https://www.databuddy.cc/contact?topic=${contactTopic}`}
-								rel="noopener noreferrer"
-								target="_blank"
-							>
-								Request access
-							</a>
-						</Button>
-					) : (
-						<Button
-							aria-label={getButtonText(eligibility, isSelected)}
-							className="w-full"
-							disabled={
-								!eligibility?.canceling &&
-								(isActive || eligibility?.status === "scheduled")
-							}
-							loading={isLoadingPreview}
-							onClick={async () => {
-								setIsLoadingPreview(true);
-								try {
-									setPreview(await previewAction());
-									setDialogOpen(true);
-								} catch (error) {
-									toast.error(
-										getUserFacingErrorMessage(
-											error,
-											"We couldn't load the billing preview. Try again."
-										)
-									);
-								} finally {
-									setIsLoadingPreview(false);
-								}
-							}}
-							size="lg"
-							variant={
-								isActive || !(isRecommended || isSelected)
-									? "secondary"
-									: "primary"
-							}
-						>
-							{getButtonText(eligibility, isSelected)}
-						</Button>
-					)}
+					<PlanButton
+						className="w-full"
+						isSelected={isSelected}
+						plan={plan}
+						size="lg"
+						successPath="/billing"
+					/>
 				</div>
 			</Card.Content>
+		</Card>
+	);
+}
+
+export function PlanButton({
+	plan,
+	successPath,
+	onPlanUpdated,
+	isSelected = false,
+	className,
+	size,
+}: {
+	plan: HookPlan;
+	successPath: string;
+	onPlanUpdated?: () => void;
+	isSelected?: boolean;
+	className?: string;
+	size?: ComponentProps<typeof Button>["size"];
+}) {
+	const { attach, previewAttach } = useCustomer();
+	const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+	const [preview, setPreview] = useState<BillingPreview | null>(null);
+	const [dialogOpen, setDialogOpen] = useState(false);
+	const eligibility = plan.customerEligibility;
+	const isActive = eligibility?.status === "active";
+	const isRecommended = plan.id === RECOMMENDED_PLAN_ID;
+	const label = getButtonText(eligibility, isSelected);
+
+	return (
+		<>
+			<Button
+				aria-label={label}
+				className={className}
+				disabled={
+					!eligibility?.canceling &&
+					(isActive || eligibility?.status === "scheduled")
+				}
+				loading={isLoadingPreview}
+				onClick={async () => {
+					setIsLoadingPreview(true);
+					try {
+						setPreview(await previewAttach({ planId: plan.id }));
+						setDialogOpen(true);
+					} catch (error) {
+						showErrorToast(error, "Failed to load billing preview");
+					} finally {
+						setIsLoadingPreview(false);
+					}
+				}}
+				size={size}
+				variant={
+					isActive || !(isRecommended || isSelected) ? "secondary" : "primary"
+				}
+			>
+				{label}
+			</Button>
 			{preview && (
 				<AttachDialog
 					action={
@@ -354,15 +331,32 @@ function PricingCard({
 								? "trial"
 								: eligibility?.attachAction
 					}
-					onConfirm={attachAction}
+					onConfirm={async () => {
+						try {
+							const result = await attach({
+								planId: plan.id,
+								metadata: getStripeMetadata(),
+								successUrl: `${window.location.origin}${successPath}`,
+							});
+							if (result?.paymentUrl) {
+								window.location.href = result.paymentUrl;
+							} else {
+								toast.success("Plan updated");
+								onPlanUpdated?.();
+							}
+						} catch (error) {
+							showErrorToast(error, "Failed to update plan");
+							throw error;
+						}
+					}}
 					open={dialogOpen}
-					planName={planName}
+					planName={getCustomerPlanName(plan.id, plan.name)}
 					preview={preview}
 					setOpen={setDialogOpen}
-					terms={investigationTerms}
+					terms={getInvestigationTerms(plan.items)}
 				/>
 			)}
-		</Card>
+		</>
 	);
 }
 

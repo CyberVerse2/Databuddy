@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { cacheable } from "@databuddy/redis/cacheable";
+import { IMPORTED_VISITOR_PREFIX } from "@databuddy/db/clickhouse";
 import { redis } from "@databuddy/redis/redis";
 import { captureError, record } from "@lib/tracing";
 import { sanitizeString, VALIDATION_LIMITS } from "@utils/validation";
@@ -58,10 +58,10 @@ for i, key in ipairs(KEYS) do
 		if claimed_at and claimed_at <= tonumber(ARGV[6]) then
 			states[i] = "ambiguous-acquired"
 		else
-			return { "retryable" }
+			states[i] = "pending"
 		end
 	else
-		return { "retryable" }
+		states[i] = "pending"
 	end
 end
 for i, key in ipairs(KEYS) do
@@ -120,43 +120,37 @@ function withDedupDeadline<T>(
 	});
 }
 
-function getCurrentDay(): number {
-	const MS_PER_DAY = 24 * 60 * 60 * 1000;
-	return Math.floor(Date.now() / MS_PER_DAY);
-}
-
-export const getDailySalt = cacheable(
-	(): Promise<string> =>
-		record("getDailySalt", async () => {
-			const saltKey = `salt:${getCurrentDay()}`;
-			try {
-				const salt = await redis.get(saltKey);
-				if (salt) {
-					return salt;
-				}
-
-				const newSalt = crypto.randomBytes(32).toString("hex");
-				const SALT_TTL = 60 * 60 * 24;
-				redis.setex(saltKey, SALT_TTL, newSalt).catch((error) => {
-					captureError(error, {
-						message: "Failed to set daily salt in Redis",
-					});
-				});
-				return newSalt;
-			} catch (error) {
-				captureError(error, {
-					message: "Failed to get daily salt from Redis",
-				});
-				return crypto.randomBytes(32).toString("hex");
+export function getDailySalt(): Promise<string> {
+	return record("getDailySalt", async () => {
+		const saltKey = `salt:${Math.floor(Date.now() / 86_400_000)}`;
+		try {
+			const salt = await redis.get(saltKey);
+			if (salt) {
+				return salt;
 			}
-		}),
-	{
-		expireInSec: 3600,
-		prefix: "daily_salt",
-		staleWhileRevalidate: true,
-		staleTime: 300,
-	}
-);
+
+			const newSalt = crypto.randomBytes(32).toString("hex");
+			const SALT_TTL = 60 * 60 * 24;
+			const stored = await redis
+				.set(saltKey, newSalt, "EX", SALT_TTL, "NX")
+				.catch((error) => {
+					captureError(error, {
+						message: "Failed to resolve daily salt in Redis",
+					});
+					return null;
+				});
+			if (stored) {
+				return newSalt;
+			}
+			return (await redis.get(saltKey)) ?? newSalt;
+		} catch (error) {
+			captureError(error, {
+				message: "Failed to resolve daily salt in Redis",
+			});
+			return crypto.randomBytes(32).toString("hex");
+		}
+	});
+}
 
 export function saltAnonymousId(anonymousId: string, salt: string): string {
 	try {
@@ -194,14 +188,19 @@ export function shouldAnonymizeVisitorIds(
 	return !RAW_VISITOR_ID_COUNTRIES.includes(code ?? "");
 }
 
+function reserveImportedVisitorPrefix(sanitized: string): string {
+	return sanitized.startsWith(IMPORTED_VISITOR_PREFIX)
+		? sanitized.slice(IMPORTED_VISITOR_PREFIX.length)
+		: sanitized;
+}
+
 export function applyVisitorIdPrivacy(
 	anonymousId: unknown,
 	anonymizeVisitorIds: boolean,
 	salt?: string
 ): string {
-	const sanitized = sanitizeString(
-		anonymousId,
-		VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
+	const sanitized = reserveImportedVisitorPrefix(
+		sanitizeString(anonymousId, VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH)
 	);
 	if (!sanitized) {
 		// Required ClickHouse String columns use "" for missing IDs; do not
@@ -439,7 +438,7 @@ type BatchDedupReservationState =
 	| "acquired"
 	| "ambiguous-acquired"
 	| "delivered"
-	| "retryable";
+	| "pending";
 
 function parseBatchReservationStates(
 	value: unknown,
@@ -448,13 +447,11 @@ function parseBatchReservationStates(
 	if (!Array.isArray(value)) {
 		throw new Error("Redis returned an invalid batch reservation result");
 	}
-	if (value.length === 1 && value[0] === "retryable") {
-		return ["retryable"];
-	}
 	const validStates = new Set<BatchDedupReservationState>([
 		"acquired",
 		"ambiguous-acquired",
 		"delivered",
+		"pending",
 	]);
 	if (
 		value.length !== expectedCount ||
@@ -528,13 +525,13 @@ export function reserveDuplicateBatch(
 
 		try {
 			const states = await withDedupDeadline(reservationOperation);
-			if (states[0] === "retryable") {
-				return inputs.map(() => ({ duplicate: false, retryable: true }));
-			}
 			return inputs.map((_input, index) => {
 				const state = states[index];
 				if (state === "delivered") {
 					return { duplicate: true };
+				}
+				if (state === "pending") {
+					return { duplicate: false, retryable: true };
 				}
 				return {
 					...(state === "ambiguous-acquired"

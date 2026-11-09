@@ -6,6 +6,7 @@ import {
 	normalizeInsightScheduleFrequency,
 } from "@databuddy/rpc/insight-schedule";
 import {
+	AI_DIGEST_DISPATCH_JOB_NAME,
 	getInsightsQueue,
 	INSIGHTS_DISPATCH_JOB_NAME,
 	INSIGHTS_MAINTENANCE_JOB_NAME,
@@ -25,16 +26,13 @@ export async function claimDueConfig(
 	if (!config.nextRunAt) {
 		return null;
 	}
+	const frequency = normalizeInsightScheduleFrequency(config.frequency);
 	const [claimed] = await db
 		.update(insightGenerationConfigs)
 		.set({
-			frequency: normalizeInsightScheduleFrequency(config.frequency),
+			frequency,
 			nextRunAt: getNextInsightRunAt(
-				{
-					enabled: config.enabled,
-					frequency: normalizeInsightScheduleFrequency(config.frequency),
-					timezone: config.timezone,
-				},
+				{ enabled: config.enabled, frequency, timezone: config.timezone },
 				now
 			),
 			updatedAt: now,
@@ -75,40 +73,44 @@ export async function retryConfigSoon(
 		);
 }
 
-export async function ensureInsightsDispatchSchedule(): Promise<void> {
-	await getInsightsQueue().upsertJobScheduler(
-		INSIGHTS_DISPATCH_JOB_NAME,
-		{ every: SCHEDULE_INTERVAL_MS },
-		{
-			name: INSIGHTS_DISPATCH_JOB_NAME,
-			data: {
-				reason: "scheduled",
-				triggeredAt: new Date().toISOString(),
-			},
-		}
-	);
-
-	emitInsightsEvent("info", "scheduler.dispatch_ensured", {
-		interval_ms: SCHEDULE_INTERVAL_MS,
+async function ensureSchedule(
+	name: string,
+	repeat: { every: number } | { pattern: string; tz: string },
+	reason: "ai_digest" | "maintenance" | "scheduled",
+	eventName: string
+): Promise<void> {
+	await getInsightsQueue().upsertJobScheduler(name, repeat, {
+		name,
+		data: { reason, triggeredAt: new Date().toISOString() },
 	});
+	emitInsightsEvent("info", eventName, repeat);
 }
 
-export async function ensureInsightsMaintenanceSchedule(): Promise<void> {
-	await getInsightsQueue().upsertJobScheduler(
+export function ensureInsightsDispatchSchedule(): Promise<void> {
+	return ensureSchedule(
+		INSIGHTS_DISPATCH_JOB_NAME,
+		{ every: SCHEDULE_INTERVAL_MS },
+		"scheduled",
+		"scheduler.dispatch_ensured"
+	);
+}
+
+export function ensureInsightsMaintenanceSchedule(): Promise<void> {
+	return ensureSchedule(
 		INSIGHTS_MAINTENANCE_JOB_NAME,
 		{ every: SCHEDULE_INTERVAL_MS },
-		{
-			name: INSIGHTS_MAINTENANCE_JOB_NAME,
-			data: {
-				reason: "maintenance",
-				triggeredAt: new Date().toISOString(),
-			},
-		}
+		"maintenance",
+		"scheduler.maintenance_ensured"
 	);
+}
 
-	emitInsightsEvent("info", "scheduler.maintenance_ensured", {
-		interval_ms: SCHEDULE_INTERVAL_MS,
-	});
+export function ensureAiDigestSchedule(): Promise<void> {
+	return ensureSchedule(
+		AI_DIGEST_DISPATCH_JOB_NAME,
+		{ pattern: "0 9 * * 1", tz: "UTC" },
+		"ai_digest",
+		"scheduler.ai_digest_ensured"
+	);
 }
 
 export async function dispatchDueInsightRuns(now = new Date()) {

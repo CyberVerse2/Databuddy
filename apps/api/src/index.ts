@@ -1,4 +1,6 @@
 import "./polyfills/compression";
+import { assertAuthSecretMatchesDashboard } from "@databuddy/auth";
+import { assertConfigured, billingMode } from "@databuddy/env/app";
 import { readBooleanEnv } from "@databuddy/env/boolean";
 import { buildHttpErrorResponse } from "@databuddy/shared/http-error-response";
 import cors from "@elysiajs/cors";
@@ -7,6 +9,7 @@ import { evlog } from "evlog/elysia";
 import { handleAutumnRequest } from "@/billing/autumn";
 import { startAutumnWebhookReplayLoop } from "@/billing/autumn-webhook-replay";
 import { startAuditOutboxReplayLoop } from "@/audit/audit-outbox-replay";
+import { startDeletedDataPurgeLoop } from "@/privacy/deleted-data-purge";
 import { configureApiInstrumentation } from "@/bootstrap/instrumentation";
 import { configureApiLogger } from "@/bootstrap/logger";
 import { registerProcessErrorHandlers } from "@/bootstrap/process-errors";
@@ -46,6 +49,13 @@ import { webhooks } from "./routes/webhooks/index";
 configureApiLogger();
 configureApiInstrumentation();
 registerProcessErrorHandlers();
+assertConfigured();
+const authSecretCheck = assertAuthSecretMatchesDashboard().catch(
+	(error: unknown) => {
+		console.error(error);
+		process.exit(1);
+	}
+);
 
 const BUN_IDLE_TIMEOUT_SECONDS = 255;
 interface RequestContext {
@@ -142,7 +152,7 @@ const app = new Elysia({ precompile: true })
 	.use(discovery)
 	.use(webhooks)
 	.mount(AUTUMN_API_PREFIX, (request) => {
-		if (readBooleanEnv("SELFHOST")) {
+		if (billingMode() !== "live") {
 			const response = buildHttpErrorResponse({
 				code: "NOT_FOUND",
 				error: null,
@@ -167,13 +177,24 @@ const autumnWebhookReplay = readBooleanEnv("SELFHOST")
 	? null
 	: startAutumnWebhookReplayLoop();
 const auditOutboxReplay = startAuditOutboxReplayLoop();
+const deletedDataPurge =
+	process.env.NODE_ENV === "production" && readBooleanEnv("DELETED_DATA_PURGE")
+		? startDeletedDataPurgeLoop()
+		: null;
 warmPostgresConnection();
 registerShutdownHooks(async () => {
-	await Promise.all([autumnWebhookReplay?.stop(), auditOutboxReplay.stop()]);
+	await Promise.all([
+		autumnWebhookReplay?.stop(),
+		auditOutboxReplay.stop(),
+		deletedDataPurge?.stop(),
+	]);
 });
 
 export default {
-	fetch: app.fetch,
+	fetch: async (request: Request) => {
+		await authSecretCheck;
+		return app.fetch(request);
+	},
 	port: Number.parseInt(process.env.PORT ?? "3001", 10) || 3001,
 	idleTimeout: BUN_IDLE_TIMEOUT_SECONDS,
 };

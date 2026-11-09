@@ -1,19 +1,22 @@
 "use client";
 
+import { APP_EVENTS } from "@databuddy/shared/custom-events";
+import { trackAppEvent } from "@/lib/app-events";
 import {
 	INVESTIGATION_USAGE,
 	investigationQuantitySchema,
 } from "@databuddy/shared/billing";
 import { Button, Card, dayjs, Field, Input, Skeleton } from "@databuddy/ui";
 import { useCustomer } from "autumn-js/react";
+import Link from "next/link";
 import { useEffect, useState } from "react";
-import { toast } from "sonner";
 import {
 	useBillingContext,
 	useInvestigationUsage,
 } from "@/components/providers/billing-provider";
 import type { summarizeInvestigationBalance } from "@/lib/investigation-usage";
-import { getUserFacingErrorMessage } from "@/lib/user-facing-error";
+import { showErrorToast } from "@/lib/user-facing-error";
+import { getStripeMetadata } from "../utils/stripe-metadata";
 
 export function InvestigationTopupCard() {
 	const { attach } = useCustomer();
@@ -44,9 +47,14 @@ export function InvestigationTopupCard() {
 			return;
 		}
 		setIsAttaching(true);
+		trackAppEvent(APP_EVENTS.topupPurchaseStarted, {
+			feature: "investigation_runs",
+			quantity: parsedQuantity.data,
+		});
 		try {
 			await attach({
 				planId: INVESTIGATION_USAGE.topupPlanId,
+				metadata: getStripeMetadata(),
 				featureQuantities: [
 					{
 						featureId: INVESTIGATION_USAGE.featureId,
@@ -56,12 +64,7 @@ export function InvestigationTopupCard() {
 				successUrl: `${window.location.origin}/billing`,
 			});
 		} catch (error) {
-			toast.error(
-				getUserFacingErrorMessage(
-					error,
-					"We couldn't open checkout. Try again."
-				)
-			);
+			showErrorToast(error, "Failed to open checkout");
 		} finally {
 			setIsAttaching(false);
 		}
@@ -144,16 +147,16 @@ export function InvestigationTopupCard() {
 							</p>
 						)}
 					</div>
-				) : (
+				) : canUserUpgrade ? (
 					<Button asChild variant="secondary">
-						<a
-							href="https://www.databuddy.cc/contact?topic=intelligence-business"
-							rel="noopener noreferrer"
-							target="_blank"
-						>
-							Request investigation access
-						</a>
+						<Link href="/billing/plans?plan=intelligence">
+							Upgrade to Business
+						</Link>
 					</Button>
+				) : (
+					<p className="text-muted-foreground text-sm">
+						Ask an organization owner or admin to upgrade to Business.
+					</p>
 				)}
 			</Card.Content>
 		</Card>

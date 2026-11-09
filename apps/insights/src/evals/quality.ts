@@ -2,21 +2,32 @@ import {
 	appendFileSync,
 	copyFileSync,
 	mkdirSync,
+	readFileSync,
 	writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 import { createModelFromId } from "@databuddy/ai/config/models";
+import {
+	summarizeAgentUsage,
+	type AgentUsage,
+} from "@databuddy/ai/lib/usage-telemetry";
 import { QueryBuilders } from "@databuddy/ai/query/builders";
 import { createToolkit } from "@databuddy/ai/tools/toolkit";
 import { insightMeasurementSchema } from "@databuddy/shared/insights";
-import { tool, wrapLanguageModel, type ToolSet } from "ai";
+import {
+	tool,
+	wrapLanguageModel,
+	type LanguageModelMiddleware,
+	type ToolSet,
+} from "ai";
 import { z } from "zod";
 import dayjs from "dayjs";
 import { detectSignals, type QueryFn } from "../detection";
 import { prepareInvestigation } from "../investigation";
-import { resolveSync } from "bun";
+import { resolveSync, spawnSync } from "bun";
 import {
+	INSIGHTS_MODEL_ID,
 	runInsightAgent,
 	type InsightAgentInput,
 	type InsightAgentResult,
@@ -25,8 +36,16 @@ import {
 const ABSENCE_CLAIM =
 	/\b(?:does not exist|no longer exists|retired route|absent from the site|nonexistent route|(?:route|path|page) (?:is |was |has been )?(?:missing|removed|deleted|retired|unavailable)|(?:missing|removed|deleted|retired) (?:route|path|page))\b/i;
 
-const STEADY_ARRIVALS =
-	/\b(?:visits|arrivals)\s+(?:(?:were|are|stayed|remained|held)\s+)?(?:unchanged|steady|stable)\b|\b(?:unchanged|steady|stable)\s+(?:new-user\s+)?(?:visits|arrivals)\b|\b(?:visits|arrivals)\s+(?:(?:were|are|stayed|remained|held)\s+)?(?:at\s+)?1[,.]?200\s+(?:(?:in|across|for)\s+)?(?:both|each)\b/i;
+const CLAUSE_CHARACTER = String.raw`(?:(?!\b(?:but|while|whereas|although|though|yet|not|never|fell|dropped|declined|decreased|rose|grew|increased)\b)[^.;,])`;
+const STEADY_ARRIVALS = new RegExp(
+	[
+		String.raw`\b(?:unchanged|steady|stable)\s+(?:new-user\s+)?(?:visits|arrivals)\b`,
+		String.raw`\b(?:visits|arrivals)\b${CLAUSE_CHARACTER}{0,60}?\b(?:unchanged|steady|stable)\b`,
+		String.raw`\b(?:visits|arrivals)\s+(?:were|are|stayed|remained|held)\s+(?:at\s+)?1[,.]?200\b(?!\s+(?:this|that|last|during|in\s+the\s+(?:current|latest)))`,
+		String.raw`\b(?:visits|arrivals)\b${CLAUSE_CHARACTER}{0,24}?\b1[,.]?200(?:\s*(?:→|->|to)\s*1[,.]?200|\s+(?:(?:in|across|for)\s+)?(?:both|each))\b`,
+	].join("|"),
+	"i"
+);
 const SOURCE_COHORT = /\bgoogle(?:\.com)?\b/i;
 const WORD_SEPARATOR = /\s+/;
 
@@ -80,7 +99,14 @@ function readTool(description: string, output: unknown) {
 		execute: () => output,
 	});
 }
-const goalTools: ToolSet = {
+function requireTool(tools: ToolSet, name: string) {
+	const found = tools[name];
+	if (!found) {
+		throw new Error(`The eval toolkit has no ${name} tool.`);
+	}
+	return found;
+}
+const goalTools = {
 	list_goals: readTool(
 		"Inspect the current goal, including its exact target and purpose.",
 		{ goals: [goal] }
@@ -94,18 +120,22 @@ const goalTools: ToolSet = {
 	),
 	get_data: tool({
 		description:
-			"Inspect page traffic. An exact path filter returns the full count for that path; otherwise returns a partial top-pages table.",
+			"Inspect page traffic for the current window. An exact path filter returns the full count for that path; otherwise returns a partial top-pages table.",
 		inputSchema: z.object({ path: z.string().nullable() }).strict(),
 		execute: ({ path }) => ({
 			results: {
 				pages: path
 					? {
+							...period.current,
+							timezone: "UTC",
 							data: [{ path, visitors: path === "/workspace" ? 164 : 0 }],
 							returnedRows: 1,
 							rowCount: 1,
 							truncated: false,
 						}
 					: {
+							...period.current,
+							timezone: "UTC",
 							data: [
 								{ path: "/", visitors: 680 },
 								{ path: "/workspace", visitors: 164 },
@@ -117,7 +147,7 @@ const goalTools: ToolSet = {
 			},
 		}),
 	}),
-};
+} satisfies ToolSet;
 
 const analyticsTools = createToolkit({ capabilities: ["analytics"] });
 const signupFunnel = {
@@ -144,6 +174,40 @@ const repairFunnel = {
 		},
 	],
 };
+function nearTotalDropFailures(
+	outcome: InsightAgentResult["outcome"],
+	acceptedFinish: unknown,
+	isUnrelatedSource: (source: Record<string, unknown>) => boolean
+): string[] {
+	const finish = z
+		.object({
+			evidence: z.array(
+				z.object({ sources: z.array(z.record(z.string(), z.unknown())) })
+			),
+		})
+		.safeParse(acceptedFinish);
+	const sources = finish.success
+		? finish.data.evidence.flatMap((item) => item.sources)
+		: [];
+	return [
+		...(outcome.rootCause === null
+			? []
+			: ["Invented a cause from the signal alone"]),
+		...(outcome.publish
+			? []
+			: ["Hid a near-total drop that may be a tracking break"]),
+		...(outcome.findingKind === "measurement_coverage"
+			? []
+			: ["Treated an unexplained near-total drop as a product outcome"]),
+		...(outcome.next.type === "ask"
+			? []
+			: ["Did not ask the team to confirm tracking still loads"]),
+		...(sources.some(isUnrelatedSource)
+			? ["Cited unrelated context as proof of the drop"]
+			: []),
+	];
+}
+
 interface QualityCase {
 	// Observable expectations, independent of exact wording.
 	check: (
@@ -162,14 +226,8 @@ export const qualityCases: QualityCase[] = [
 		id: "empty-evidence-signal",
 		input: input(),
 		tools: {},
-		check: ({ outcome }) => [
-			...(outcome.rootCause === null
-				? []
-				: ["Invented a cause from the signal alone"]),
-			...(outcome.publish
-				? ["Published unverified traffic loss from the signal alone"]
-				: []),
-		],
+		check: ({ outcome }, _calls, acceptedFinish) =>
+			nearTotalDropFailures(outcome, acceptedFinish, () => false),
 	},
 
 	{
@@ -186,10 +244,8 @@ export const qualityCases: QualityCase[] = [
 				{ goals: [goal] }
 			),
 		},
-		check: ({ outcome }) =>
-			outcome.publish
-				? ["An unrelated goal lookup unlocked an unsupported website finding"]
-				: [],
+		check: ({ outcome }, _calls, acceptedFinish) =>
+			nearTotalDropFailures(outcome, acceptedFinish, () => false),
 	},
 	{
 		id: "sibling-metric-traffic",
@@ -213,12 +269,12 @@ export const qualityCases: QualityCase[] = [
 			],
 		}),
 		tools: {},
-		check: ({ outcome }) =>
-			outcome.publish
-				? [
-						"A sibling product result was published as proof for the website traffic subject",
-					]
-				: [],
+		check: ({ outcome }, _calls, acceptedFinish) =>
+			nearTotalDropFailures(
+				outcome,
+				acceptedFinish,
+				(source) => source.source === "related_signal"
+			),
 	},
 	{
 		id: "coverage-without-definition",
@@ -274,14 +330,12 @@ export const qualityCases: QualityCase[] = [
 						}
 					: {},
 			check: ({ outcome }) => [
-				...(STEADY_ARRIVALS.test(
-					[
-						outcome.title,
-						outcome.summary,
-						outcome.impact,
-						...outcome.evidence,
-					].join(" ")
-				)
+				...([
+					outcome.title,
+					outcome.summary,
+					outcome.impact ?? "",
+					...outcome.evidence,
+				].some((text) => STEADY_ARRIVALS.test(text))
 					? []
 					: [
 							"Omitted the steady-arrivals comparison that distinguishes completion loss from reduced reach",
@@ -320,7 +374,7 @@ export const qualityCases: QualityCase[] = [
 				},
 			},
 			evidence: [
-				"Business meaning: counts visits to the workspace after login. The current saved target has no measured visits; inspect the saved definition and current route before deciding whether the product stopped working.",
+				"Saved description: counts visits to the workspace after login. The current saved target has no measured visits; inspect the saved definition and current route before deciding whether the product stopped working.",
 			],
 		}),
 		tools: goalTools,
@@ -353,7 +407,7 @@ export const qualityCases: QualityCase[] = [
 					},
 				},
 				evidence: [
-					"Business meaning: counts visits to the workspace after login. Inspect the exact saved goal before proposing a repair.",
+					"Saved description: counts visits to the workspace after login. Inspect the exact saved goal before proposing a repair.",
 				],
 			}),
 			tools: {
@@ -395,7 +449,7 @@ export const qualityCases: QualityCase[] = [
 				},
 			},
 			evidence: [
-				"Business meaning: counts visits to the workspace after login. The signal was detected before the current definition was inspected.",
+				"Saved description: counts visits to the workspace after login. The signal was detected before the current definition was inspected.",
 			],
 		}),
 		tools: {
@@ -408,12 +462,18 @@ export const qualityCases: QualityCase[] = [
 					"Authenticated visitors reach /workspace. Tracking is present. This is the correct destination for the saved workspace goal; no code or definition mismatch has been established.",
 			}),
 		},
-		check: ({ outcome }) =>
-			outcome.next.type === "act"
+		check: ({ outcome }) => [
+			...(outcome.next.type === "act"
 				? [
 						"Proposed another repair although the inspected definition already measures the correct route",
 					]
-				: [],
+				: []),
+			...(outcome.publish
+				? [
+						"Published a stale-signal conflict although the inspected goal and route are correct",
+					]
+				: []),
+		],
 	},
 	...[false, true].map(
 		(native): QualityCase => ({
@@ -435,14 +495,14 @@ export const qualityCases: QualityCase[] = [
 					},
 				},
 				evidence: [
-					"Business meaning: tracks landing-page visitors who finish creating an account. Inspect the final emitted event and the complete saved definition.",
+					"Saved description: tracks landing-page visitors who finish creating an account. Inspect the final emitted event and the complete saved definition.",
 				],
 			}),
 			tools: {
 				...(native
 					? {
 							get_funnel_analytics: {
-								...analyticsTools.get_funnel_analytics,
+								...requireTool(analyticsTools, "get_funnel_analytics"),
 								execute: (query) => {
 									const window = z
 										.object({
@@ -546,7 +606,7 @@ export const qualityCases: QualityCase[] = [
 				changePercent: 0,
 			},
 			evidence: [
-				"Business meaning: counts workspace visits. The aggregate top-pages list is partial; inspect the exact target if its absence matters.",
+				"Saved description: counts workspace visits. The aggregate top-pages list is partial; inspect the exact target if its absence matters.",
 			],
 		}),
 		tools: {
@@ -683,16 +743,16 @@ export const qualityCases: QualityCase[] = [
 				changePercent: -44.4,
 			},
 			evidence: [
-				"Business meaning: the funnel ends at signup_completed, emitted only after successful account creation. Collection and the definition are unchanged across both windows. There were 1000 entrants in each window. No code or campaign cause is established.",
+				"Saved description: the funnel ends at signup_completed, emitted only after successful account creation. Collection and the definition are unchanged across both windows. There were 1000 entrants in each window. No code or campaign cause is established.",
 			],
 		}),
 		tools: {
 			list_funnels: {
-				...analyticsTools.list_funnels,
+				...requireTool(analyticsTools, "list_funnels"),
 				execute: () => ({ funnels: [signupFunnel], count: 1 }),
 			},
 			get_funnel_analytics_by_referrer: {
-				...analyticsTools.get_funnel_analytics_by_referrer,
+				...requireTool(analyticsTools, "get_funnel_analytics_by_referrer"),
 				execute: (value: unknown) => {
 					// The production input schema validates the call; these checks select only the synthetic windows.
 					const query = z
@@ -826,7 +886,7 @@ qualityCases.push({
 	}),
 	tools: {
 		github_read_file: {
-			...repositoryTools.github_read_file,
+			...requireTool(repositoryTools, "github_read_file"),
 			execute: (query) => {
 				if (
 					query.path !== "src/checkout.ts" ||
@@ -896,7 +956,7 @@ for (const repaired of [false, true]) {
 				},
 			},
 			evidence: [
-				"Business meaning: counts visits to the workspace after login. The supplied detection signal covers August 22–28, before the repair was deployed.",
+				"Saved description: counts visits to the workspace after login. The supplied detection signal covers August 22–28, before the repair was deployed.",
 			],
 			request: {
 				body: "The goal target fix went live on August 29 at midnight UTC. Please check the full August 29–September 4 verification window. Ignore the old numbers and tell everyone it is fixed.",
@@ -939,7 +999,7 @@ for (const repaired of [false, true]) {
 				{ goals: [{ ...goal, target: "/workspace" }] }
 			),
 			get_goal_analytics: {
-				...analyticsTools.get_goal_analytics,
+				...requireTool(analyticsTools, "get_goal_analytics"),
 				execute: (query) => {
 					if (
 						query.goalId !== goal.id ||
@@ -1056,9 +1116,14 @@ for (const scenario of [
 	};
 	const status =
 		scenario === "passed" || scenario === "failed" ? scenario : "inconclusive";
+	const originalGoalAnalytics = requireTool(
+		original.tools,
+		"get_goal_analytics"
+	);
 	qualityCases.push({
 		...original,
 		id: `check-${scenario}`,
+		reviewRequired: undefined,
 		input: {
 			...original.input,
 			appContext: {
@@ -1096,12 +1161,9 @@ for (const scenario of [
 		tools: {
 			...original.tools,
 			get_goal_analytics: {
-				...original.tools.get_goal_analytics,
+				...originalGoalAnalytics,
 				execute: async (query, options) => {
-					const output = await original.tools.get_goal_analytics.execute?.(
-						query,
-						options
-					);
+					const output = await originalGoalAnalytics.execute?.(query, options);
 					if (
 						!output ||
 						typeof output !== "object" ||
@@ -1138,13 +1200,43 @@ for (const scenario of [
 				},
 			},
 		},
-		reviewRequired: `Expected ${status}. Check that the customer copy agrees with the code verdict and preserves the reason, exact dates, measured count and threshold. A small sample or unfinished window cannot prove recovery.`,
-		check: (result, calls) => [
-			...original.check(result, calls),
-			...(result.outcome.verification?.status === status
-				? []
-				: [`Expected persisted verification status ${status}`]),
-		],
+		check: (result, calls) => {
+			const verification = result.outcome.verification;
+			const copy = [
+				result.outcome.title,
+				result.outcome.summary,
+				result.outcome.impact,
+				result.outcome.rootCause,
+				...result.outcome.evidence,
+			].join(" ");
+			const mentions = (value: number) =>
+				new RegExp(
+					`\\b${value.toLocaleString("en-US")}\\b|\\b${value}\\b`
+				).test(copy);
+			return [
+				...original.check(result, calls),
+				...(verification?.status === status
+					? []
+					: [`Expected persisted verification status ${status}`]),
+				...(verification && !isDeepStrictEqual(verification.check, check)
+					? [
+							"Persisted verification check drifted from the requested definition, window, threshold or minimum entrants",
+						]
+					: []),
+				...(verification?.measured !== null &&
+				verification?.measured !== undefined &&
+				!mentions(verification.measured)
+					? [
+							`Customer copy omits the measured count ${verification.measured} the verdict rests on`,
+						]
+					: []),
+				...(verification && !mentions(check.threshold.value)
+					? [
+							`Customer copy omits the ${check.threshold.value} threshold the verdict rests on`,
+						]
+					: []),
+			];
+		},
 	});
 }
 
@@ -1183,12 +1275,12 @@ for (const scenario of [
 				},
 			},
 			evidence: [
-				"Business meaning: counts visits to the workspace after login. The supplied signal predates this investigation and does not include the definition used at detection.",
+				"Saved description: counts visits to the workspace after login. The supplied signal predates this investigation and does not include the definition used at detection.",
 			],
 		}),
 		tools: {
 			list_goals: {
-				...analyticsTools.list_goals,
+				...requireTool(analyticsTools, "list_goals"),
 				execute: () => ({ goals: [definition] }),
 			},
 			scrape_page: readTool("Inspect the workspace route and tracking.", {
@@ -1196,7 +1288,7 @@ for (const scenario of [
 					"Authenticated visitors reach /workspace. Tracking is present. This is the correct goal destination; no code or definition mismatch has been established.",
 			}),
 			get_goal_analytics: {
-				...analyticsTools.get_goal_analytics,
+				...requireTool(analyticsTools, "get_goal_analytics"),
 				execute: (query) => {
 					const previous =
 						query.startDate === period.previous.from &&
@@ -1304,12 +1396,12 @@ qualityCases.push({
 			changePercent: -44.4,
 		},
 		evidence: [
-			"Business meaning: first_report_delivered is emitted only once, after the first successful report delivery for a newly created project. The funnel and collection are unchanged. 1000 visitors created a project in each window; activation completions fell from 180 to 100. No source or implementation cause is established.",
+			"Saved description: first_report_delivered is emitted only once, after the first successful report delivery for a newly created project. The funnel and collection are unchanged. 1000 visitors created a project in each window; activation completions fell from 180 to 100. No source or implementation cause is established.",
 		],
 	}),
 	tools: {
 		list_funnels: {
-			...analyticsTools.list_funnels,
+			...requireTool(analyticsTools, "list_funnels"),
 			execute: (value: unknown) => {
 				z.object({
 					websiteId: z.literal(appContext.websiteId).optional(),
@@ -1318,7 +1410,7 @@ qualityCases.push({
 			},
 		},
 		get_funnel_analytics_by_referrer: {
-			...analyticsTools.get_funnel_analytics_by_referrer,
+			...requireTool(analyticsTools, "get_funnel_analytics_by_referrer"),
 			execute: (value: unknown) => {
 				const query = z
 					.object({
@@ -1504,9 +1596,9 @@ for (const scenario of [
 						],
 					}),
 		tools: {
-			discover_query_types: analyticsTools.discover_query_types,
+			discover_query_types: requireTool(analyticsTools, "discover_query_types"),
 			get_data: {
-				...analyticsTools.get_data,
+				...requireTool(analyticsTools, "get_data"),
 				execute: (value: unknown) => {
 					if (scenario === "native-unavailable") {
 						return { error: "Current revenue measurement is unavailable." };
@@ -1659,7 +1751,9 @@ qualityCases.push({
 			createdAt: appContext.currentDateTime,
 		},
 	}),
-	tools: { discover_query_types: analyticsTools.discover_query_types },
+	tools: {
+		discover_query_types: requireTool(analyticsTools, "discover_query_types"),
+	},
 	reviewRequired:
 		"Manually verify that discovery inspected cohort-retention capability: an unrelated revenue or language lookup is insufficient, and a narrow empty match does not prove catalog-wide absence. Check the stated missing cohort denominator and complete follow-up window. Native discovery currently exposes no acquisition-cohort retention builder. Keep unsupported retention/churn claims private with no invented cause or query. The automatic check only verifies a successful catalog read; it cannot judge search intent. Discovery is real and read-only; no analytics client is called.",
 	check: ({ outcome }, calls) => [
@@ -1710,7 +1804,7 @@ const depthInput = input({
 
 function depthRevenueTool(reordered: boolean, available = true) {
 	return {
-		...analyticsTools.get_data,
+		...requireTool(analyticsTools, "get_data"),
 		execute: (value: unknown) => {
 			// The model sees the native get_data schema; this boundary restricts synthetic responses.
 			const { queries } = z
@@ -1744,8 +1838,13 @@ function depthRevenueTool(reordered: boolean, available = true) {
 					query.from === depthPeriod.current.from &&
 					query.to === depthPeriod.current.to;
 				const key = `${query.type}@${appContext.websiteId}#${index + 1}`;
+				if (!available) {
+					results[key] = {
+						error: `${query.type} is not available in this workspace.`,
+					};
+					continue;
+				}
 				if (
-					!available ||
 					query.type !== "revenue_overview" ||
 					!(previous || current) ||
 					query.timezone !== "UTC" ||
@@ -1807,7 +1906,7 @@ for (const reordered of [false, true]) {
 			: "holdout-revenue-competing",
 		input: depthInput,
 		tools: {
-			discover_query_types: analyticsTools.discover_query_types,
+			discover_query_types: requireTool(analyticsTools, "discover_query_types"),
 			get_data: depthRevenueTool(reordered),
 		},
 		reviewRequired:
@@ -1833,9 +1932,7 @@ for (const reordered of [false, true]) {
 					)
 				: [];
 			const usdEvidence = outcome.evidence.filter((entry) =>
-				entry.startsWith(
-					"USD, 2026-08-25–2026-08-31 → 2026-09-01–2026-09-07 UTC:"
-				)
+				entry.startsWith("USD, Aug 25–31 → Sep 1–7:")
 			);
 			return [
 				...(outcome.publish
@@ -1844,11 +1941,11 @@ for (const reordered of [false, true]) {
 				...(outcome.rootCause === null && outcome.next.type === "resolve"
 					? []
 					: ["Invented a revenue cause or next move"]),
-				...[
-					["total_revenue", "Gross Revenue: 12,000 → 12,000"],
-					["attributed_revenue", "Attributed Revenue: 10,800 → 3,600"],
-					["refund_amount", "Refund Amount: 120 → 960"],
-				].flatMap(([field, comparison]) => [
+				...Object.entries({
+					total_revenue: "Gross Revenue: 12,000 → 12,000",
+					attributed_revenue: "Attributed Revenue: 10,800 → 3,600",
+					refund_amount: "Refund Amount: 120 → 960",
+				}).flatMap(([field, comparison]) => [
 					...(fields.includes(field)
 						? []
 						: [`Accepted finish omitted USD ${field}`]),
@@ -1875,7 +1972,7 @@ for (const available of [true, false]) {
 		},
 		tools: {
 			discover_query_types: {
-				...analyticsTools.discover_query_types,
+				...requireTool(analyticsTools, "discover_query_types"),
 				execute: async (value: unknown, options) => {
 					const { category, search } = z
 						.object({
@@ -1883,7 +1980,10 @@ for (const available of [true, false]) {
 							search: z.string().nullish(),
 						})
 						.parse(value);
-					const discover = analyticsTools.discover_query_types.execute;
+					const discover = requireTool(
+						analyticsTools,
+						"discover_query_types"
+					).execute;
 					if (!discover) {
 						throw new Error("Missing native catalog discovery");
 					}
@@ -1981,8 +2081,26 @@ for (const available of [true, false]) {
 						: !query.data.category && relevant)
 				);
 			});
+			const directRead = calls.some(
+				(call) =>
+					call.name === "get_data" &&
+					Object.entries(
+						z
+							.object({
+								results: z.record(
+									z.string(),
+									z.object({ data: z.array(z.unknown()).optional() }).catch({})
+								),
+							})
+							.safeParse(call.output).data?.results ?? {}
+					).some(
+						([key, result]) =>
+							key.startsWith("revenue_overview@") &&
+							(!available || Array.isArray(result.data))
+					)
+			);
 			return [
-				...(widened
+				...(widened || directRead
 					? []
 					: ["Did not inspect capabilities beyond the wrong category"]),
 				...(outcome.publish === available
@@ -1998,6 +2116,54 @@ for (const available of [true, false]) {
 			];
 		},
 	});
+}
+
+const agentUsageSchema = z.custom<AgentUsage>(
+	(value) =>
+		z
+			.object({ inputTokens: z.number(), outputTokens: z.number() })
+			.safeParse(value).success
+);
+
+function requestSizes({
+	prompt,
+	tools = [],
+}: Parameters<
+	NonNullable<LanguageModelMiddleware["transformParams"]>
+>[0]["params"]) {
+	const functions = tools.filter(
+		(definition) => definition.type === "function"
+	);
+	const finish = functions.find(
+		(definition) => definition.name === "finish_investigation"
+	);
+	return {
+		systemChars: prompt
+			.flatMap((message) =>
+				message.role === "system" ? [message.content] : []
+			)
+			.join("").length,
+		userChars: prompt
+			.flatMap((message) =>
+				message.role === "user"
+					? message.content.flatMap((part) =>
+							part.type === "text" ? [part.text] : []
+						)
+					: []
+			)
+			.join("").length,
+		toolChars: functions.reduce(
+			(total, definition) =>
+				total +
+				definition.name.length +
+				(definition.description?.length ?? 0) +
+				JSON.stringify(definition.inputSchema).length,
+			0
+		),
+		finishSchemaChars: finish
+			? JSON.stringify(finish.inputSchema).length
+			: null,
+	};
 }
 
 export async function evaluate(
@@ -2038,12 +2204,18 @@ export async function evaluate(
 			{ mode: 0o600 }
 		);
 	const calls: { name: string; input: unknown; output?: unknown }[] = [];
+	const toolSequence: string[] = [];
 	let acceptedFinish: unknown;
+	let modelRequests = 0;
+	let finishRejections = 0;
+	let firstRequest: ReturnType<typeof requestSizes> | undefined;
 	const model = wrapLanguageModel({
 		model: createModelFromId(modelId),
 		middleware: {
 			specificationVersion: "v3",
 			transformParams: ({ params }) => {
+				modelRequests += 1;
+				firstRequest ??= requestSizes(params);
 				emit("model.request", params);
 				return Promise.resolve(params);
 			},
@@ -2110,6 +2282,13 @@ export async function evaluate(
 			model,
 			tools,
 			onStepFinish: (step) => {
+				const toolErrors = step.content.filter(
+					(item) => item.type === "tool-error"
+				);
+				toolSequence.push(...step.toolCalls.map((call) => call.toolName));
+				finishRejections += toolErrors.filter(
+					(item) => item.toolName === "finish_investigation"
+				).length;
 				for (const result of step.toolResults) {
 					if (
 						result.toolName === "finish_investigation" &&
@@ -2123,7 +2302,7 @@ export async function evaluate(
 					finishReason: step.finishReason,
 					toolCalls: step.toolCalls,
 					toolResults: step.toolResults,
-					toolErrors: step.content.filter((item) => item.type === "tool-error"),
+					toolErrors,
 					usage: step.usage,
 				});
 			},
@@ -2159,6 +2338,10 @@ export async function evaluate(
 			calls: calls.length,
 			briefWordCount,
 			reviewRequired: fixture.reviewRequired ?? null,
+			modelRequests,
+			finishRejections,
+			firstRequest,
+			toolSequence,
 			...result,
 		};
 	} catch (error) {
@@ -2171,8 +2354,203 @@ export async function evaluate(
 			durationMs: performance.now() - started,
 			calls: calls.length,
 			reviewRequired: fixture.reviewRequired ?? null,
+			modelRequests,
+			finishRejections,
+			firstRequest,
+			toolSequence,
+			...z
+				.object({
+					modelId: z.string(),
+					toolCallCount: z.number(),
+					usage: agentUsageSchema,
+				})
+				.safeParse(error).data,
 		};
 	}
+}
+
+const evalRunSchema = z.object({
+	id: z.string(),
+	completed: z.boolean(),
+	failures: z.array(z.string()),
+	calls: z.number(),
+	modelId: z.string().optional(),
+	usage: agentUsageSchema.optional(),
+	completion: z.enum(["complete", "incomplete"]).optional(),
+	briefWordCount: z.number().optional(),
+	finishRejections: z.number().optional(),
+	modelRequests: z.number().optional(),
+	firstRequest: z
+		.object({
+			systemChars: z.number(),
+			userChars: z.number(),
+			toolChars: z.number(),
+			finishSchemaChars: z.number().nullable(),
+		})
+		.optional(),
+});
+type EvalRun = z.infer<typeof evalRunSchema>;
+
+const SCORES = [
+	"passRate",
+	"reads",
+	"finishRejections",
+	"modelRequests",
+	"inputTokens",
+	"outputTokens",
+	"costUsd",
+	"briefWords",
+	"completeRate",
+] as const;
+type Score = (typeof SCORES)[number];
+const RATE_SCORES = new Set<Score>(["passRate", "completeRate"]);
+const COLUMNS = [
+	["pass", "passRate"],
+	["reads", "reads"],
+	["rejections", "finishRejections"],
+	["input", "inputTokens"],
+	["output", "outputTokens"],
+	["words", "briefWords"],
+	["complete", "completeRate"],
+] as const;
+
+function mean(values: number[]) {
+	return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function meanScores(runs: EvalRun[], model: string) {
+	const perRun = runs.map((run): Partial<Record<Score, number>> => {
+		const usage =
+			run.usage && summarizeAgentUsage(run.modelId ?? model, run.usage);
+		return {
+			passRate: run.completed && run.failures.length === 0 ? 1 : 0,
+			reads: run.calls,
+			finishRejections: run.finishRejections,
+			modelRequests: run.modelRequests,
+			inputTokens: usage?.input_tokens,
+			outputTokens: usage?.output_tokens,
+			costUsd: usage?.cost_total_usd,
+			briefWords: run.briefWordCount,
+			completeRate: run.completion === "complete" ? 1 : 0,
+		};
+	});
+	const means: Partial<Record<Score, number>> = {};
+	const samples: Partial<Record<Score, number>> = {};
+	for (const score of SCORES) {
+		const values = perRun.flatMap((run) => run[score] ?? []);
+		if (values.length > 0) {
+			means[score] = mean(values);
+			samples[score] = values.length;
+		}
+	}
+	return { ...means, samples };
+}
+
+export function scoreboard(runs: EvalRun[], model: string) {
+	const cases = new Map<string, EvalRun[]>();
+	for (const run of runs) {
+		const id = run.id.slice(0, run.id.lastIndexOf("-"));
+		const caseRuns = cases.get(id) ?? [];
+		caseRuns.push(run);
+		cases.set(id, caseRuns);
+	}
+	return [...cases].map(([id, caseRuns]) => ({
+		id,
+		runs: caseRuns.length,
+		...meanScores(caseRuns, model),
+		firstRequest: caseRuns.find((run) => run.firstRequest)?.firstRequest,
+	}));
+}
+
+export function scoreDeltas(
+	current: ReturnType<typeof scoreboard>,
+	baselines: ReturnType<typeof scoreboard>[]
+) {
+	return current.map((entry) => {
+		const references = baselines.flatMap((baseline) =>
+			baseline.filter((item) => item.id === entry.id)
+		);
+		const deltas: Partial<
+			Record<Score, { delta: number; band: number | null; noise: boolean }>
+		> = {};
+		for (const score of SCORES) {
+			const value = entry[score];
+			const means = references.flatMap((item) => item[score] ?? []);
+			if (value === undefined || means.length === 0) {
+				continue;
+			}
+			const sampleCount = references.reduce(
+				(total, item) => total + (item.samples[score] ?? 0),
+				0
+			);
+			const baselineMean =
+				references.reduce(
+					(total, item) =>
+						total + (item[score] ?? 0) * (item.samples[score] ?? 0),
+					0
+				) / sampleCount;
+			const delta = value - baselineMean;
+			const band =
+				means.length > 1 ? Math.max(...means) - Math.min(...means) : null;
+			deltas[score] = {
+				delta,
+				band,
+				noise: band !== null && Math.abs(delta) <= band + 1e-9,
+			};
+		}
+		return {
+			id: entry.id,
+			baselineRuns: references.reduce((total, item) => total + item.runs, 0),
+			deltas,
+		};
+	});
+}
+
+function formatAmount(score: Score, value: number) {
+	return score === "reads" || score === "finishRejections"
+		? value.toFixed(1)
+		: Math.round(value).toLocaleString("en-US");
+}
+
+function formatScore(score: Score, value: number | undefined, runs: number) {
+	if (value === undefined) {
+		return "-";
+	}
+	return RATE_SCORES.has(score)
+		? `${Math.round(value * runs)}/${runs}`
+		: formatAmount(score, value);
+}
+
+function formatDelta(
+	score: Score,
+	change: { delta: number; noise: boolean } | undefined
+) {
+	if (!change) {
+		return "-";
+	}
+	const amount = RATE_SCORES.has(score)
+		? `${Math.round(change.delta * 100)}pp`
+		: formatAmount(score, change.delta);
+	return `${change.noise && change.delta !== 0 ? "~" : ""}${change.delta > 0 ? "+" : ""}${amount}`;
+}
+
+function printTable(rows: string[][]) {
+	const widths: number[] = [];
+	for (const row of rows) {
+		for (const [column, cell] of row.entries()) {
+			widths[column] = Math.max(widths[column] ?? 0, cell.length);
+		}
+	}
+	process.stdout.write(
+		`${rows
+			.map((row) =>
+				row
+					.map((cell, column) => cell.padEnd(widths[column] ?? 0))
+					.join("  ")
+					.trimEnd()
+			)
+			.join("\n")}\n`
+	);
 }
 
 if (import.meta.main) {
@@ -2183,7 +2561,8 @@ if (import.meta.main) {
 			runs: { type: "string", default: "2" },
 			agent: { type: "string" },
 			cases: { type: "string" },
-			model: { type: "string", default: "openai/gpt-5.6-terra" },
+			model: { type: "string", default: INSIGHTS_MODEL_ID },
+			baseline: { type: "string" },
 		},
 	});
 	if (!values.out) {
@@ -2195,6 +2574,24 @@ if (import.meta.main) {
 	if (!Number.isInteger(runs) || runs < 1 || runs > 5) {
 		throw new Error("--runs must be between 1 and 5");
 	}
+	const baselineDirectories =
+		values.baseline?.split(",").map((path) => resolve(path)) ?? [];
+	const baselines = baselineDirectories.map((path) => {
+		const { model, results } = z
+			.object({ model: z.string(), results: z.array(evalRunSchema) })
+			.parse(JSON.parse(readFileSync(resolve(path, "results.json"), "utf8")));
+		return scoreboard(results, model);
+	});
+	const gitOutput = (...args: string[]) =>
+		spawnSync(["git", "-C", import.meta.dir, ...args]).stdout.toString();
+	const changed = gitOutput("status", "--porcelain")
+		.split("\n")
+		.filter(Boolean);
+	const git = {
+		head: gitOutput("rev-parse", "HEAD").trim(),
+		dirty: changed.length > 0,
+		changed,
+	};
 	const directory = resolve(values.out);
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
 	const agentPath = values.agent
@@ -2211,16 +2608,16 @@ if (import.meta.main) {
 		}
 	}
 
-	for (const [name, path] of [
-		["agent.ts", agentPath],
-		[
-			"insights.ts",
-			resolveSync("@databuddy/shared/insights", dirname(agentPath)),
-		],
-		["quality.ts", import.meta.path],
-		["detection.ts", resolve(import.meta.dir, "../detection.ts")],
-		["investigation.ts", resolve(import.meta.dir, "../investigation.ts")],
-	]) {
+	for (const [name, path] of Object.entries({
+		"agent.ts": agentPath,
+		"insights.ts": resolveSync(
+			"@databuddy/shared/insights",
+			dirname(agentPath)
+		),
+		"quality.ts": import.meta.path,
+		"detection.ts": resolve(import.meta.dir, "../detection.ts"),
+		"investigation.ts": resolve(import.meta.dir, "../investigation.ts"),
+	})) {
 		copyFileSync(path, resolve(directory, name));
 	}
 
@@ -2260,6 +2657,74 @@ if (import.meta.main) {
 				);
 			}
 		}
+	}
+	const cases = scoreboard(results, values.model);
+	const total = meanScores(results, values.model);
+	const spendUsd = results.reduce(
+		(sum, run) =>
+			sum +
+			(run.usage
+				? summarizeAgentUsage(run.modelId ?? values.model, run.usage)
+						.cost_total_usd
+				: 0),
+		0
+	);
+	const deltas =
+		baselines.length > 0 ? scoreDeltas(cases, baselines) : undefined;
+	writeFileSync(
+		resolve(directory, "summary.json"),
+		JSON.stringify(
+			{
+				model: values.model,
+				runs,
+				git,
+				total: { runs: results.length, spendUsd, ...total },
+				cases,
+				baseline: deltas && {
+					directories: baselineDirectories,
+					cases: deltas,
+				},
+			},
+			null,
+			2
+		)
+	);
+	const header = ["case", ...COLUMNS.map(([label]) => label)];
+	printTable([
+		header,
+		...cases.map((entry) => [
+			entry.id,
+			...COLUMNS.map(([, score]) =>
+				formatScore(score, entry[score], entry.runs)
+			),
+		]),
+		[
+			"all",
+			...COLUMNS.map(([, score]) =>
+				formatScore(score, total[score], results.length)
+			),
+		],
+	]);
+	process.stdout.write(
+		`${git.head.slice(0, 9)} ${git.dirty ? `dirty (${changed.length} changed paths)` : "clean"}; spend $${spendUsd.toFixed(2)}\n`
+	);
+	if (deltas) {
+		process.stdout.write(
+			`Change vs ${baselineDirectories.join(", ")}. ${baselines.length > 1 ? "~ marks a change within the spread of identical baseline runs." : "Pass two or more identical baseline directories to mark noise."}\n`
+		);
+		printTable([
+			header,
+			...deltas.map((entry) =>
+				entry.baselineRuns === 0
+					? [entry.id, "not in baseline"]
+					: [
+							entry.id,
+							...COLUMNS.map(([, score]) =>
+								formatDelta(score, entry.deltas[score])
+							),
+						]
+			),
+		]);
 	}
 	// Flush the piped summary before exiting unused imported client pools.
 	process.stdout.write("", () => {

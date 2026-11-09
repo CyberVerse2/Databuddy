@@ -10,7 +10,6 @@ import { z } from "zod";
 import { ExpirationPicker } from "@/app/(main)/links/_components/expiration-picker";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { orpc } from "@/lib/orpc";
-import { getUserFacingErrorMessage } from "@/lib/user-facing-error";
 import { cn } from "@/lib/utils";
 import {
 	formatMaskedApiKey,
@@ -203,6 +202,7 @@ export function ApiKeySheet({
 			return;
 		}
 		lastResetKeyId.current = resetKey;
+		setNewSecret(null);
 		setExpiryOpen(!apiKey);
 
 		if (!apiKey) {
@@ -252,13 +252,7 @@ export function ApiKeySheet({
 		setShowRotateConfirm(false);
 		setShowRevokeConfirm(false);
 		onOpenChangeAction(false);
-		setTimeout(() => {
-			lastResetKeyId.current = null;
-			setNewSecret(null);
-			setTags([]);
-			setWebsiteAccess([]);
-			form.reset();
-		}, 200);
+		lastResetKeyId.current = null;
 	};
 
 	const invalidateQueries = () => {
@@ -356,9 +350,7 @@ export function ApiKeySheet({
 			setNewSecret(res.secret);
 			toast.success("API key created");
 		},
-		onError: (err: Error) => {
-			toast.error(getUserFacingErrorMessage(err, "Failed to create API key."));
-		},
+		meta: { errorTitle: "Failed to create API key" },
 	});
 
 	const updateMutation = useMutation({
@@ -368,9 +360,7 @@ export function ApiKeySheet({
 			toast.success("API key updated");
 			handleClose();
 		},
-		onError: (err: Error) => {
-			toast.error(getUserFacingErrorMessage(err, "Failed to update API key."));
-		},
+		meta: { errorTitle: "Failed to update API key" },
 	});
 
 	const rotateMutation = useMutation({
@@ -380,9 +370,7 @@ export function ApiKeySheet({
 			invalidateQueries();
 			toast.success("API key rotated");
 		},
-		onError: (err: Error) => {
-			toast.error(getUserFacingErrorMessage(err, "Failed to rotate API key."));
-		},
+		meta: { errorTitle: "Failed to rotate API key" },
 	});
 
 	const revokeMutation = useMutation({
@@ -391,9 +379,7 @@ export function ApiKeySheet({
 			invalidateQueries();
 			toast.success("API key revoked");
 		},
-		onError: (err: Error) => {
-			toast.error(getUserFacingErrorMessage(err, "Failed to revoke API key."));
-		},
+		meta: { errorTitle: "Failed to revoke API key" },
 	});
 
 	const deleteMutation = useMutation({
@@ -404,9 +390,7 @@ export function ApiKeySheet({
 			setShowDeleteConfirm(false);
 			handleClose();
 		},
-		onError: (err: Error) => {
-			toast.error(getUserFacingErrorMessage(err, "Failed to delete API key."));
-		},
+		meta: { errorTitle: "Failed to delete API key" },
 	});
 
 	const buildResources = (scopes: ApiScope[]) => {
@@ -512,12 +496,20 @@ export function ApiKeySheet({
 	const submitLabel = isCreate
 		? newSecret
 			? "Done"
-			: "Create Key"
-		: "Save Changes";
+			: "Create API key"
+		: "Save changes";
 
 	return (
 		<>
-			<Sheet onOpenChange={handleClose} open={open}>
+			<Sheet
+				onOpenChange={handleClose}
+				onOpenChangeComplete={(isOpen) => {
+					if (!isOpen) {
+						setNewSecret(null);
+					}
+				}}
+				open={open}
+			>
 				<Sheet.Content className="sm:max-w-lg" side="right">
 					<Sheet.Header>
 						<div className="flex items-start gap-3">
@@ -527,7 +519,7 @@ export function ApiKeySheet({
 							<div className="min-w-0 flex-1">
 								<div className="flex items-center gap-2">
 									<Sheet.Title className="truncate">
-										{apiKey ? apiKey.name : "Create API Key"}
+										{apiKey ? apiKey.name : "Create API key"}
 									</Sheet.Title>
 									{status && (
 										<Badge size="sm" variant={status.variant}>
@@ -554,14 +546,14 @@ export function ApiKeySheet({
 					>
 						<Sheet.Body className="space-y-6">
 							{newSecret && (
-								<div className="rounded-md border border-success/30 bg-success/5 p-3">
+								<div className="rounded-md border bg-card p-3">
 									<div className="mb-2 flex items-center gap-1.5">
 										<CheckCircleIcon className="text-success" size={13} />
-										<Text className="text-success" variant="label">
+										<Text variant="label">
 											{isCreate ? "Secret key" : "New secret generated"}
 										</Text>
 									</div>
-									<div className="group relative overflow-hidden rounded-md border border-success/20 bg-background">
+									<div className="group relative overflow-hidden rounded-md border border-border/60 bg-background">
 										<div className="relative px-3 py-2.5">
 											<code className="block break-all pr-8 font-mono text-[11px] text-foreground leading-relaxed">
 												{newSecret}
@@ -585,7 +577,7 @@ export function ApiKeySheet({
 										</div>
 									</div>
 									<Text className="mt-2" tone="muted" variant="caption">
-										Copy this now — it won't be shown again.
+										Copy this now. It won't be shown again.
 									</Text>
 								</div>
 							)}
@@ -785,7 +777,7 @@ export function ApiKeySheet({
 												</Text>
 											)}
 											{hasNoPermissions && (
-												<div className="mb-3 flex gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2">
+												<div className="mb-3 flex gap-2 rounded-md border bg-card px-3 py-2">
 													<TriangleWarningIcon className="mt-0.5 size-4 shrink-0 text-warning" />
 													<Text tone="muted" variant="caption">
 														This key has no permissions selected and will not be
@@ -808,7 +800,7 @@ export function ApiKeySheet({
 																		{scope.label}
 																		{scope.value === "read:data" && (
 																			<Badge size="sm" variant="muted">
-																				default
+																				Default
 																			</Badge>
 																		)}
 																	</span>
@@ -865,7 +857,7 @@ export function ApiKeySheet({
 												</div>
 
 												{isLoadingWebsites ? (
-													<div className="flex items-center gap-2 rounded-md border border-border/60 border-dashed px-3 py-3">
+													<div className="flex items-center gap-2 rounded-md border border-border/60 px-3 py-3">
 														<GlobeIcon className="size-4 shrink-0 animate-pulse text-muted-foreground" />
 														<Text tone="muted" variant="caption">
 															Loading websites…
@@ -976,7 +968,7 @@ export function ApiKeySheet({
 														})}
 													</div>
 												) : (
-													<div className="flex items-center gap-2 rounded-md border border-border/60 border-dashed px-3 py-3">
+													<div className="flex items-center gap-2 rounded-md border border-border/60 px-3 py-3">
 														<LockSimpleIcon className="size-4 shrink-0 text-muted-foreground" />
 														<Text tone="muted" variant="caption">
 															No websites in this organization yet.
@@ -998,7 +990,7 @@ export function ApiKeySheet({
 												size="sm"
 												variant={rateLimitEnabled ? "success" : "muted"}
 											>
-												{rateLimitEnabled ? "On" : "Off"}
+												{rateLimitEnabled ? "Enabled" : "Disabled"}
 											</Badge>
 										</Accordion.Trigger>
 										<Accordion.Content>
@@ -1144,7 +1136,7 @@ export function ApiKeySheet({
 					<Dialog onOpenChange={setShowDeleteConfirm} open={showDeleteConfirm}>
 						<Dialog.Content>
 							<Dialog.Header>
-								<Dialog.Title>Delete API Key?</Dialog.Title>
+								<Dialog.Title>Delete API key</Dialog.Title>
 								<Dialog.Description>
 									This action cannot be undone. Any applications using this key
 									will immediately lose access.
@@ -1172,7 +1164,7 @@ export function ApiKeySheet({
 					<Dialog onOpenChange={setShowRotateConfirm} open={showRotateConfirm}>
 						<Dialog.Content>
 							<Dialog.Header>
-								<Dialog.Title>Rotate API Key?</Dialog.Title>
+								<Dialog.Title>Rotate API key</Dialog.Title>
 								<Dialog.Description>
 									A new secret will be generated and the current one will stop
 									working immediately. Anything using the old secret will break
@@ -1205,10 +1197,10 @@ export function ApiKeySheet({
 					<Dialog onOpenChange={setShowRevokeConfirm} open={showRevokeConfirm}>
 						<Dialog.Content>
 							<Dialog.Header>
-								<Dialog.Title>Revoke API Key?</Dialog.Title>
+								<Dialog.Title>Revoke API key</Dialog.Title>
 								<Dialog.Description>
 									This key will stop working immediately. Revocation is
-									permanent — the key cannot be re-enabled. Create a new key if
+									permanent: the key cannot be re-enabled. Create a new key if
 									you need one.
 								</Dialog.Description>
 							</Dialog.Header>

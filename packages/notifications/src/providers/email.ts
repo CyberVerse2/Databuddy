@@ -4,28 +4,23 @@ import type {
 	NotificationResult,
 } from "../types";
 import { BaseProvider } from "./base";
+import { formatMetadataLabel, isUserFacingMetadata } from "./payload-utils";
 
-const FIRST_CHARACTER_PATTERN = /^./;
-const UPTIME_MESSAGE_METADATA_KEYS = new Set([
-	"checkedAt",
-	"error",
-	"httpCode",
-	"kind",
-	"probeRegion",
-	"siteLabel",
-	"sslExpiryMs",
-	"sslValid",
-	"totalMs",
-	"ttfbMs",
-	"url",
-]);
-const UPTIME_TRANSITION_MESSAGE_METADATA_KEYS = new Set([
-	"checkedAt",
-	"dashboardUrl",
-	"httpCode",
-	"kind",
-	"monitorName",
-]);
+const METADATA_IN_MESSAGE: Record<string, ReadonlySet<string>> = {
+	"uptime-transition": new Set([
+		"checkedAt",
+		"dashboardUrl",
+		"httpCode",
+		"kind",
+		"monitorName",
+	]),
+	"uptime-ssl-expiry": new Set([
+		"dashboardUrl",
+		"daysRemaining",
+		"expiresAt",
+		"monitorName",
+	]),
+};
 
 export interface EmailProviderConfig {
 	defaultTo?: string | string[];
@@ -43,31 +38,6 @@ function escapeHtml(str: string): string {
 		.replaceAll(">", "&gt;")
 		.replaceAll('"', "&quot;")
 		.replaceAll("'", "&#39;");
-}
-
-function isUserFacingMetadata(key: string, template: unknown): boolean {
-	if (template === "uptime" && UPTIME_MESSAGE_METADATA_KEYS.has(key)) {
-		return false;
-	}
-	if (
-		template === "uptime-transition" &&
-		UPTIME_TRANSITION_MESSAGE_METADATA_KEYS.has(key)
-	) {
-		return false;
-	}
-	return !(
-		key === "to" ||
-		key === "template" ||
-		key === "zScore" ||
-		key.endsWith("Id")
-	);
-}
-
-function formatMetadataLabel(key: string): string {
-	return key
-		.replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
-		.replaceAll(/[_-]+/g, " ")
-		.replace(FIRST_CHARACTER_PATTERN, (character) => character.toUpperCase());
 }
 
 export class EmailProvider extends BaseProvider {
@@ -119,9 +89,12 @@ export class EmailProvider extends BaseProvider {
 			);
 		}
 
+		const template = payload.metadata?.template;
+		const metadataInMessage =
+			typeof template === "string" ? METADATA_IN_MESSAGE[template] : undefined;
 		const metadataEntries = payload.metadata
-			? Object.entries(payload.metadata).filter(([key]) =>
-					isUserFacingMetadata(key, payload.metadata?.template)
+			? Object.entries(payload.metadata).filter(
+					([key]) => isUserFacingMetadata(key) && !metadataInMessage?.has(key)
 				)
 			: [];
 

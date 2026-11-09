@@ -1,39 +1,36 @@
-import {
-	INVESTIGATION_ALLOWANCES,
-	INVESTIGATION_USAGE,
-} from "@databuddy/shared/billing";
 import type { Metadata } from "next";
 import { Footer } from "@/components/footer";
-import { CELL_TITLE_CLASS } from "@/components/landing/demo-constants";
+import { McpTerminalDemo } from "@/components/landing/ai-section";
+import {
+	BaselineBands,
+	ChangeVerdicts,
+	ChatQuery,
+	FixVerify,
+	InvestigationStage,
+	SlackThread,
+} from "@/components/landing/databunny-demo-visuals";
 import {
 	FeatureHero,
-	GridCell,
-	SectionHeader,
-	TwoColumnGrid,
+	FeatureRow,
+	FeatureSection,
 } from "@/components/landing/demo-primitives";
 import { FaqSection } from "@/components/landing/faq-section";
-import {
-	AgentChatDemo,
-	AnomalyDetectionDemo,
-	CaseFollowUpDemo,
-	InsightCardsDemo,
-	ProactiveAlertsDemo,
-	SuggestedPromptsDemo,
-} from "@/components/landing/databunny-demo-visuals";
-import Section from "@/components/landing/section";
 import { StructuredData } from "@/components/structured-data";
+import { TrackOnMount } from "@/components/track-on-mount";
+
+const TITLE = "Databunny: AI analyst for product analytics | Databuddy";
+const DESCRIPTION =
+	"Ask Databunny about traffic, funnels, and errors in plain words and open the query behind each answer. Business and Scale add daily or weekly investigations.";
 
 export const metadata: Metadata = {
-	title: "AI Analytics Agent - Ask Your Data Questions in Plain English",
-	description:
-		"Databunny investigates your analytics on its own, delivers evidence-backed findings to Slack, and answers questions in plain English.",
+	title: { absolute: TITLE },
+	description: DESCRIPTION,
 	alternates: {
 		canonical: "https://www.databuddy.cc/databunny",
 	},
 	openGraph: {
-		title: "AI Analytics Agent - Ask Your Data Questions in Plain English",
-		description:
-			"Databunny investigates your analytics on its own, delivers evidence-backed findings to Slack, and answers questions in plain English.",
+		title: TITLE,
+		description: DESCRIPTION,
 		url: "https://www.databuddy.cc/databunny",
 		images: ["/og-image.png"],
 	},
@@ -41,133 +38,111 @@ export const metadata: Metadata = {
 
 const FAQ_ITEMS = [
 	{
-		question: "What can I ask Databunny?",
+		question: "What do I need to set up?",
 		answer:
-			"Anything about your analytics. Traffic trends, conversion funnels, error patterns, user segments, page performance. Ask in plain English and get an answer with real data behind it.",
+			"The Databuddy tracker. GitHub, Stripe, and Search Console are optional. Automatic checks need about two weeks of data first.",
 	},
 	{
-		question: "How does automatic analysis work?",
+		question: "How often does it run?",
 		answer:
-			"On the invite-only Business and Scale plans, choose a daily or weekly schedule for your organization. Databunny investigates noteworthy changes, keeps the evidence and history together, and gives you a concrete next step.",
+			"Daily or weekly, at 9:00 in the timezone you choose, on the Business and Scale plans.",
 	},
 	{
-		question: "What becomes an investigation?",
-		answer:
-			"Databunny compares recent periods and checks anomaly baselines across traffic, errors, conversions, events, and performance. It saves only changes with enough evidence to act on.",
+		question: "Does Databunny change anything on its own?",
+		answer: "No. Nothing changes until you click Apply or confirm in chat.",
 	},
 	{
-		question: "Can investigations go to Slack?",
+		question: "What data goes to AI models?",
 		answer:
-			"Yes. Databunny posts actionable investigations to your configured channels, and replies in that thread continue the same investigation.",
+			"Your question and the data needed to answer it, sent to the AI model provider. Our data policy explains how that data is handled.",
 	},
 	{
-		question: "Is Databunny included in all plans?",
-		answer: `Databunny chat runs on AI credits, and every plan includes a monthly allowance. Business includes ${INVESTIGATION_ALLOWANCES.intelligence} investigations per month and Scale includes ${INVESTIGATION_ALLOWANCES.intelligence_scale}, with $${INVESTIGATION_USAGE.priceUsd} per extra. Investigation access is invite only.`,
+		question: "Does it always find the cause?",
+		answer:
+			"No. When the data doesn't show one, Databunny says so and tells you what to keep watching.",
+	},
+	{
+		question: "What does chat cost?",
+		answer: "Chat runs on AI credits, and every plan includes some.",
 	},
 ] as const;
-
-const container = "mx-auto w-full max-w-400 px-4 sm:px-14 lg:px-20";
 
 export default function DatabunnyPage() {
 	return (
 		<>
+			<TrackOnMount
+				event="feature_landing_viewed"
+				properties={{ feature: "databunny" }}
+			/>
 			<StructuredData
 				elements={[{ type: "faq", items: [...FAQ_ITEMS] }]}
 				page={{
-					title:
-						"AI Analytics Agent - Ask Your Data Questions in Plain English",
-					description:
-						"Ask analytics questions in plain English. Run automatic investigations daily or weekly and continue them from Slack.",
+					title: TITLE,
+					description: DESCRIPTION,
 					url: "https://www.databuddy.cc/databunny",
 				}}
 			/>
 			<div className="overflow-x-hidden">
 				<FeatureHero
-					docsHref="/docs"
-					primaryLabel="Request investigation access"
-					primaryHref="/contact?topic=intelligence-business"
-					footnote={`Invite only. Business: ${INVESTIGATION_ALLOWANCES.intelligence}/month. Scale: ${INVESTIGATION_ALLOWANCES.intelligence_scale}/month. $${INVESTIGATION_USAGE.priceUsd} per extra.`}
-					subtitle="Ask questions about your analytics or schedule investigations into traffic, errors, and conversions. Get the findings and supporting evidence in your dashboard or Slack."
-					title="The analyst that finds problems before you ask."
+					docsHref="/pricing"
+					footnote="Chat is on every plan. Scheduled investigations are on Business and Scale."
+					primaryHref="https://app.databuddy.cc/register"
+					primaryLabel="Try chat free"
+					secondaryLabel="Compare plans"
+					subtitle="Databunny, the AI analyst built into Databuddy, answers questions about traffic, funnels, and errors without SQL. Open the query behind every number to check the answer."
+					title="Ask your analytics in plain words and see the query."
+					visual={<ChatQuery />}
 				/>
 
-				<Section className="border-border border-b" id="insights">
-					<div className={container}>
-						<SectionHeader
-							subtitle="On a daily or weekly schedule, Databunny checks anomaly baselines across traffic, errors, conversions, events, and performance. It opens an investigation when a change has enough evidence to act on."
-							title="Investigations that"
-							titleMuted="find you."
-						/>
-						<TwoColumnGrid>
-							<GridCell>
-								<h3 className={CELL_TITLE_CLASS}>
-									Surface trends, spikes, and drops automatically.
-								</h3>
-								<InsightCardsDemo />
-							</GridCell>
-							<GridCell>
-								<h3 className={CELL_TITLE_CLASS}>
-									Keep evidence, replies, and follow-up checks in one case.
-								</h3>
-								<CaseFollowUpDemo />
-							</GridCell>
-						</TwoColumnGrid>
-					</div>
-				</Section>
+				<FeatureRow
+					body="Every day or week, at 9:00 in your timezone, Databunny checks your traffic, funnels, errors, page speed, and revenue, comparing the last 7 days with the prior 7. When a change is real, it investigates and posts what it found and what to do next in Slack. Checks are not real time."
+					flip
+					id="scheduled"
+					title="Scheduled checks on Business and Scale."
+					visual={<BaselineBands />}
+				/>
 
-				<Section className="border-border border-b" id="detection">
-					<div className={container}>
-						<SectionHeader
-							subtitle="Actionable investigations go to Slack with impact, evidence, and a next step. Reply in the thread and Databunny continues the same case."
-							title="Findings arrive"
-							titleMuted="where you work."
-						/>
-						<TwoColumnGrid>
-							<GridCell>
-								<h3 className={CELL_TITLE_CLASS}>
-									Detect spikes and drops across pageviews, errors, and events.
-								</h3>
-								<AnomalyDetectionDemo />
-							</GridCell>
-							<GridCell>
-								<h3 className={CELL_TITLE_CLASS}>
-									Actions, questions, and resolutions, delivered to Slack.
-								</h3>
-								<ProactiveAlertsDemo />
-							</GridCell>
-						</TwoColumnGrid>
-					</div>
-				</Section>
+				<FeatureSection
+					id="quiet"
+					subtitle="Normal weekday and weekend swings and changes on small numbers are filtered out before anything reaches Slack."
+					title="Hear only about changes worth acting on."
+				>
+					<ChangeVerdicts />
+				</FeatureSection>
 
-				<Section className="border-border border-b" id="agent">
-					<div className={container}>
-						<SectionHeader
-							subtitle="Type a question about your traffic, conversions, errors, or performance. Databunny queries your data and shows the findings and supporting evidence."
-							title="Ask anything,"
-							titleMuted="get real answers."
-						/>
-						<TwoColumnGrid>
-							<GridCell>
-								<h3 className={CELL_TITLE_CLASS}>
-									Have a conversation with your analytics data.
-								</h3>
-								<AgentChatDemo />
-							</GridCell>
-							<GridCell>
-								<h3 className={CELL_TITLE_CLASS}>
-									Start from a suggestion or ask your own question.
-								</h3>
-								<SuggestedPromptsDemo />
-							</GridCell>
-						</TwoColumnGrid>
-					</div>
-				</Section>
+				<FeatureSection
+					id="investigations"
+					subtitle="Each investigation shows what Databunny checked and found, then ends with an action, a question for you, or a note to keep watching."
+					title="See the evidence behind every finding."
+				>
+					<InvestigationStage />
+				</FeatureSection>
 
-				<Section className="border-border border-b" id="faq">
-					<div className={container}>
-						<FaqSection items={[...FAQ_ITEMS]} />
-					</div>
-				</Section>
+				<FeatureRow
+					body="Databunny posts changes that need an action or an answer, and keeps updates on the same problem in one thread."
+					id="slack"
+					title="Your team hears about it in Slack."
+					visual={<SlackThread />}
+				/>
+
+				<FeatureRow
+					body="When a funnel or goal stops matching real traffic, Databunny proposes the fix and confirms it worked after you apply it."
+					flip
+					id="fixes"
+					title="Fix broken tracking in one click."
+					visual={<FixVerify />}
+				/>
+
+				<FeatureRow
+					body="Sign in from Claude or Claude Code, or connect any other MCP client with a scoped key, and your agent can read your data and investigations and set up funnels, goals, and flags."
+					id="mcp"
+					title="Bring your analytics into Claude Code and Cursor."
+					visual={<McpTerminalDemo />}
+				/>
+
+				<FeatureSection id="faq">
+					<FaqSection items={[...FAQ_ITEMS]} />
+				</FeatureSection>
 
 				<Footer />
 			</div>

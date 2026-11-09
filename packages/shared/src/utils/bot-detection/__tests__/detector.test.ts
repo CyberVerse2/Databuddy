@@ -1,18 +1,24 @@
 import { describe, expect, it } from "bun:test";
+import {
+	AI_AGENT_CLASSIFICATION,
+	AI_AGENTS,
+	identifyAiAgent,
+	matchAiAgent,
+} from "../ai-agents";
 import { detectBot } from "../detector";
 import { BotAction, BotCategory } from "../types";
 import { extractBotName, matchCategory, parseUserAgent } from "../user-agent";
+import wellKnownBots from "../well-known-bots.json";
 
 function expectBot(ua: string, category: BotCategory, action: BotAction) {
 	const result = detectBot(ua);
 	expect(result.isBot).toBe(true);
 	expect(result.category).toBe(category);
 	expect(result.action).toBe(action);
-	return result;
 }
 
 describe("detectBot", () => {
-	describe("AI crawlers — every major provider", () => {
+	describe("AI crawlers from every major provider", () => {
 		it.each([
 			[
 				"OpenAI GPTBot",
@@ -45,7 +51,6 @@ describe("detectBot", () => {
 			["TikTokSpider", "TikTokSpider"],
 			["Bravebot", "Bravebot"],
 			["YouBot", "YouBot/1.0"],
-			["v0bot", "v0bot"],
 			["HuggingFace-Bot", "HuggingFace-Bot"],
 			["CCBot", "CCBot/2.0"],
 			["Diffbot", "Diffbot/0.1"],
@@ -53,7 +58,6 @@ describe("detectBot", () => {
 			["ChatGLM-Spider", "ChatGLM-Spider"],
 			["Together-Bot", "Together-Bot"],
 			["Replicate-Bot", "Replicate-Bot"],
-			["FirecrawlAgent", "FirecrawlAgent"],
 			["Cohere crawler", "cohere-training-data-crawler"],
 			["Cloudflare-AI-Search", "Cloudflare-AI-Search/1.0"],
 			["SBIntuitionsBot", "SBIntuitionsBot/1.0"],
@@ -75,6 +79,8 @@ describe("detectBot", () => {
 			["Perplexity-User", "Perplexity-User/1.0"],
 			["Cohere-AI", "Cohere-AI/1.0"],
 			["Meta ExternalFetcher", "meta-externalfetcher/1.0"],
+			["FirecrawlAgent", "FirecrawlAgent"],
+			["v0bot", "v0bot"],
 		])("detects %s as track-only AI assistant", (_label, ua) => {
 			expectBot(ua, BotCategory.AI_ASSISTANT, BotAction.TRACK_ONLY);
 		});
@@ -97,7 +103,7 @@ describe("detectBot", () => {
 			["DuckDuckBot", "DuckDuckBot/1.0"],
 			["Baiduspider", "Mozilla/5.0 (compatible; Baiduspider/2.0)"],
 		])("allows %s", (_label, ua) => {
-			expectBot(ua, BotCategory.SEARCH_ENGINE, BotAction.ALLOW);
+			expectBot(ua, BotCategory.SEARCH_ENGINE, BotAction.TRACK_ONLY);
 		});
 	});
 
@@ -111,7 +117,7 @@ describe("detectBot", () => {
 			["WhatsApp", "WhatsApp/2.23"],
 			["Telegrambot", "TelegramBot (like TwitterBot)"],
 		])("allows %s", (_label, ua) => {
-			expectBot(ua, BotCategory.SOCIAL_MEDIA, BotAction.ALLOW);
+			expectBot(ua, BotCategory.SOCIAL_MEDIA, BotAction.TRACK_ONLY);
 		});
 	});
 
@@ -142,7 +148,7 @@ describe("detectBot", () => {
 			["Datadog", "Datadog/Synthetics"],
 			["Site24x7", "Site24x7"],
 		])("allows %s", (_label, ua) => {
-			expectBot(ua, BotCategory.MONITORING, BotAction.ALLOW);
+			expectBot(ua, BotCategory.MONITORING, BotAction.TRACK_ONLY);
 		});
 	});
 
@@ -174,7 +180,7 @@ describe("detectBot", () => {
 		});
 	});
 
-	describe("human traffic — no false positives", () => {
+	describe("human traffic without false positives", () => {
 		it.each([
 			[
 				"Chrome Desktop",
@@ -236,85 +242,21 @@ describe("detectBot", () => {
 		});
 	});
 
-	describe("missing user agent", () => {
-		it("blocks an empty user agent by default", () => {
-			expect(detectBot("")).toMatchObject({
-				isBot: true,
-				category: BotCategory.UNKNOWN_BOT,
-				action: BotAction.BLOCK,
-				reason: "missing_user_agent",
-			});
-		});
-
-		it("allows an empty user agent when configured", () => {
-			const result = detectBot("", { blockMissingUserAgent: false });
-			expect(result.isBot).toBe(true);
-			expect(result.action).toBe(BotAction.ALLOW);
+	it("blocks an empty user agent", () => {
+		expect(detectBot("")).toMatchObject({
+			isBot: true,
+			category: BotCategory.UNKNOWN_BOT,
+			action: BotAction.BLOCK,
+			reason: "missing_user_agent",
 		});
 	});
 
-	describe("configuration overrides", () => {
-		it("allowlist overrides category action", () => {
-			const result = detectBot("AhrefsBot/7.0", { allowedBots: ["AhrefsBot"] });
-			expect(result.action).toBe(BotAction.ALLOW);
-			expect(result.reason).toBe("explicit_allowlist");
-		});
-
-		it("blocklist overrides category action", () => {
-			const result = detectBot("Googlebot/2.1", { blockedBots: ["Googlebot"] });
-			expect(result.action).toBe(BotAction.BLOCK);
-			expect(result.reason).toBe("explicit_blocklist");
-		});
-
-		it("allowAICrawlers changes AI action to ALLOW", () => {
-			const result = detectBot("GPTBot/1.0", {
-				allowAICrawlers: true,
-				trackOnlyCategories: [],
-			});
-			expect(result.action).toBe(BotAction.ALLOW);
-		});
-
-		it("allowSearchEngines=false blocks search bots", () => {
-			const result = detectBot("Googlebot/2.1", { allowSearchEngines: false });
-			expect(result.action).toBe(BotAction.BLOCK);
-		});
-
-		it("allowSocialMedia=false blocks social bots", () => {
-			const result = detectBot("Twitterbot/1.0", { allowSocialMedia: false });
-			expect(result.action).toBe(BotAction.BLOCK);
-		});
-
-		it("allowMonitoring=false blocks monitoring bots", () => {
-			const result = detectBot("UptimeRobot/2.0", { allowMonitoring: false });
-			expect(result.action).toBe(BotAction.BLOCK);
-		});
-
-		it("allowSEOTools=true allows SEO bots", () => {
-			const result = detectBot("AhrefsBot/7.0", { allowSEOTools: true });
-			expect(result.action).toBe(BotAction.ALLOW);
-		});
-	});
-
-	describe("caching", () => {
-		it("custom config bypasses the cache", () => {
-			const ua = "Googlebot/2.1";
-			expect(detectBot(ua).action).toBe(BotAction.ALLOW);
-			expect(detectBot(ua, { allowSearchEngines: false }).action).toBe(
-				BotAction.BLOCK
-			);
-		});
-	});
-
-	describe("generic isBot() fallback", () => {
-		it("respects trackOnlyCategories for bots only caught by ua-parser-js's generic isBot()", () => {
-			const result = detectBot("PowerShell/7.1.0", {
-				trackOnlyCategories: [BotCategory.UNKNOWN_BOT],
-			});
-
-			expect(result.isBot).toBe(true);
-			expect(result.category).toBe(BotCategory.UNKNOWN_BOT);
-			expect(result.reason).toBe("general_bot_pattern");
-			expect(result.action).toBe(BotAction.TRACK_ONLY);
+	it("blocks bots only caught by ua-parser-js's generic isBot()", () => {
+		expect(detectBot("PowerShell/7.1.0")).toMatchObject({
+			isBot: true,
+			category: BotCategory.UNKNOWN_BOT,
+			reason: "general_bot_pattern",
+			action: BotAction.BLOCK,
 		});
 	});
 });
@@ -370,7 +312,140 @@ describe("parseUserAgent", () => {
 		expect(result.osName).toBe("iOS");
 	});
 
-	it("returns only the raw value for an empty string", () => {
-		expect(parseUserAgent("")).toEqual({ raw: "" });
+	it.each([
+		[
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/2.2553.1 Chrome/152.0.7977.76 Safari/537.36",
+			"Claude",
+			"2.2553.1",
+		],
+		[
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Cursor/3.6.31 Chrome/142.0.7444.265 Electron/39.8.1 Safari/537.36",
+			"Cursor",
+			"3.6.31",
+		],
+	])("reports the AI desktop app as the browser for %s", (ua, name, version) => {
+		const result = parseUserAgent(ua);
+		expect(result.browserName).toBe(name);
+		expect(result.browserVersion).toBe(version);
+	});
+
+	it("returns no fields for an empty string", () => {
+		expect(parseUserAgent("")).toEqual({});
+	});
+});
+
+describe("AI agent registry", () => {
+	it("classifies exactly the vendored bots tagged ai", () => {
+		const upstreamIds = new Set(wellKnownBots.map((bot) => bot.id));
+		const unclassified = wellKnownBots
+			.filter((bot) => bot.categories.includes("ai"))
+			.map((bot) => bot.id)
+			.filter((id) => !(id in AI_AGENT_CLASSIFICATION));
+		const stale = Object.keys(AI_AGENT_CLASSIFICATION).filter(
+			(id) => !upstreamIds.has(id)
+		);
+		expect({ stale, unclassified }).toEqual({ stale: [], unclassified: [] });
+	});
+
+	it("matches every agent's upstream sample user agents", () => {
+		const mismatches = AI_AGENTS.flatMap((agent) => {
+			const instances = wellKnownBots.find(
+				(bot) => bot.id === agent.id
+			)?.instances;
+			return [
+				...(instances?.accepted ?? [])
+					.filter((ua) => detectBot(ua).agent?.id !== agent.id)
+					.map((ua) => `${agent.id} missed ${ua}`),
+				...(instances?.rejected ?? [])
+					.filter((ua) => matchAiAgent(ua)?.id === agent.id)
+					.map((ua) => `${agent.id} matched rejected ${ua}`),
+			];
+		});
+		expect(mismatches).toEqual([]);
+	});
+
+	it.each([
+		[
+			"Claude-User (claude-code/2.1.280; +https://support.anthropic.com/)",
+			"Claude Code",
+		],
+		[
+			"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-User/1.0; +Claude-User@anthropic.com)",
+			"Claude",
+		],
+		[
+			"Mozilla/5.0 (compatible; Google-Gemini-CLI/1.0; +https://github.com/google-gemini/gemini-cli)",
+			"Gemini CLI",
+		],
+		[
+			"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)",
+			"ChatGPT",
+		],
+		[
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+			null,
+		],
+		[
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/2.2553.1 Chrome/152.0.7977.76 Safari/537.36",
+			null,
+		],
+		[
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Cursor/3.6.31 Chrome/142.0.7444.265 Electron/39.8.1 Safari/537.36",
+			null,
+		],
+	])("attributes %s to %p", (userAgent, product) => {
+		expect(matchAiAgent(userAgent)?.product ?? null).toBe(product);
+	});
+});
+
+describe("identifyAiAgent", () => {
+	const CHROME =
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+	const AHREFS =
+		"Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)";
+
+	it.each([
+		[
+			"a known user agent",
+			{
+				userAgent:
+					"Claude-User (claude-code/2.1.280; +https://support.anthropic.com/)",
+			},
+			undefined,
+			"claude-code",
+		],
+		[
+			"a registered signer",
+			{ signatureAgent: '"https://chatgpt.com"', userAgent: CHROME },
+			undefined,
+			"chatgpt-agent",
+		],
+		[
+			"an unknown signer, by domain",
+			{ signatureAgent: '"https://agents.example.dev"', userAgent: CHROME },
+			undefined,
+			"agents.example.dev",
+		],
+		[
+			"a named SEO bot that signs",
+			{ signatureAgent: '"https://ahrefs.com"', userAgent: AHREFS },
+			BotCategory.SEO_TOOL,
+			null,
+		],
+		[
+			"a library asking for markdown first",
+			{ accept: "text/markdown, */*", userAgent: "axios/1.7.2" },
+			BotCategory.SCRAPER,
+			"unidentified:axios",
+		],
+		[
+			"a library excluding markdown with q=0",
+			{ accept: "text/markdown;q=0, text/html", userAgent: "axios/1.7.2" },
+			BotCategory.SCRAPER,
+			null,
+		],
+		["a browser", { accept: "text/html", userAgent: CHROME }, undefined, null],
+	])("identifies %s", (_case, signals, category, expected) => {
+		expect(identifyAiAgent(signals, category)?.id ?? null).toBe(expected);
 	});
 });

@@ -5,21 +5,27 @@ import { evlog, useLogger } from "evlog/elysia";
 import { getDailySalt, saltAnonymousId } from "@lib/security";
 import { basketErrors } from "@lib/structured-errors";
 import { sanitizeString, VALIDATION_LIMITS } from "@utils/validation";
-import { formatDate, getWebhookConfig, resolveWebsiteId } from "./shared";
+import {
+	formatDate,
+	getWebhookConfig,
+	recordWebhookDelivery,
+	resolveWebsiteId,
+} from "./shared";
 
 interface PaddleTransaction {
 	billed_at: string | null;
 	created_at: string;
 	currency_code: string;
 	custom_data?: Record<string, string>;
+	customer_id?: string | null;
 	details: {
 		totals: { total: string };
 		line_items?: Array<{
 			product: { id: string; name: string };
-			price: { billing_cycle: { interval: string } | null };
 		}>;
 	};
 	id: string;
+	subscription_id?: string | null;
 }
 
 async function extractAnalyticsMetadata(
@@ -53,6 +59,7 @@ async function extractAnalyticsMetadata(
 
 interface PaddleEvent {
 	data: PaddleTransaction;
+	event_id?: string;
 	event_type: string;
 }
 
@@ -146,8 +153,7 @@ async function handleTransaction(
 	const log = useLogger();
 	const metadata = await extractAnalyticsMetadata(tx.custom_data);
 	const lineItems = tx.details.line_items || [];
-	const isSubscription = lineItems.some((i) => i?.price?.billing_cycle != null);
-	const type = isSubscription ? "subscription" : "sale";
+	const type = tx.subscription_id ? "subscription" : "sale";
 	const amount = Number.parseFloat(tx.details.totals.total) / 100;
 	const currency = tx.currency_code;
 
@@ -174,6 +180,7 @@ async function handleTransaction(
 				),
 				transaction_id: tx.id,
 				provider: "paddle",
+				customer_id: tx.customer_id || undefined,
 				type,
 				status: "completed",
 				amount,
@@ -238,17 +245,35 @@ export const paddleWebhook = new Elysia().use(evlog()).post(
 
 		log.set({ eventType: event.event_type });
 
+		let recordCount = 0;
+		let status: "failed" | "processed" = "failed";
 		try {
 			if (event.event_type === "transaction.completed") {
 				await handleTransaction(event.data, result);
+				recordCount = 1;
 			} else {
 				log.set({ unhandled: true });
 			}
+			status = "processed";
 
 			return { received: true, type: event.event_type };
 		} catch (error) {
 			log.error(error instanceof Error ? error : new Error(String(error)));
 			throw basketErrors.webhookProcessingFailed();
+		} finally {
+			await recordWebhookDelivery({
+				eventId: event.event_id ?? "",
+				eventType: event.event_type,
+				ownerId: result.ownerId,
+				provider: "paddle",
+				recordCount,
+				status,
+				websiteId: result.websiteId,
+			}).catch((error) => {
+				log.error(error instanceof Error ? error : new Error(String(error)), {
+					webhookDeliveryLog: "write_failed",
+				});
+			});
 		}
 	},
 	{ parse: "none" }

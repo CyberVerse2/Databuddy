@@ -7,11 +7,19 @@ CREATE TABLE IF NOT EXISTS analytics.ai_traffic_spans
 	`user_agent` String CODEC(ZSTD(1)),
 	`path` String CODEC(ZSTD(1)),
 	`referrer` Nullable(String) CODEC(ZSTD(1)),
+	`agent_id` LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+	`agent_purpose` LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+	`verification` LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+	`source` LowCardinality(String) DEFAULT 'tracker' CODEC(ZSTD(1)),
+	`format` LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+	`host` LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+	`accept` String DEFAULT '' CODEC(ZSTD(1)),
+	`status_code` UInt16 DEFAULT 0 CODEC(ZSTD(1)),
 	INDEX idx_client_id client_id TYPE bloom_filter(0.01) GRANULARITY 1,
 	INDEX idx_bot_type bot_type TYPE bloom_filter(0.01) GRANULARITY 1,
 	INDEX idx_bot_name bot_name TYPE bloom_filter(0.01) GRANULARITY 1
 )
-ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/analytics_ai_traffic_spans', '{replica}')
-PARTITION BY toDate(timestamp)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/analytics_ai_traffic_spans_v2', '{replica}')
+PARTITION BY toYYYYMM(timestamp)
 ORDER BY (client_id, bot_type, timestamp)
 SETTINGS index_granularity = 8192

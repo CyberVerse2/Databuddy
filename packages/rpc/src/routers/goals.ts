@@ -13,13 +13,18 @@ import { randomUUIDv7 } from "bun";
 import { z } from "zod";
 import { rpcError } from "../errors";
 import {
-	type AnalyticsStep,
+	buildGoalAnalyticsResult,
 	getTotalWebsiteUsers,
 	processGoalAnalytics,
+	processGoalsConversionCountsBatch,
 } from "../lib/analytics-utils";
 import { getErrorLogFields } from "@databuddy/shared/evlog-fields";
 import { logger } from "../lib/logger";
 import { invalidateGoalsCache } from "../lib/goals-cache";
+import {
+	getEffectiveStartDate,
+	groupGoalsForBulkAnalytics,
+} from "../lib/goals-bulk-analytics-grouping";
 import { setTrackProperties } from "../middleware/track-mutation";
 import { publicProcedure, trackedProcedure } from "../orpc";
 import {
@@ -28,25 +33,16 @@ import {
 	withWorkspace,
 } from "../procedures/with-workspace";
 import { requireFeatureWithLimit } from "../types/billing";
+import {
+	conversionAnalyticsOutputSchema,
+	filterSchema,
+	toAnalyticsSteps,
+} from "./funnel-steps";
 import { queueDefinitionChangeRechecks } from "./insights";
 
 const ANALYTICS_CACHE_TTL = 180;
+const BATCH_CHUNK_SIZE = 255;
 const cache = createDrizzleCache({ redis, namespace: "goals" });
-
-const filterSchema = z.object({
-	field: z.string(),
-	operator: z.enum([
-		"equals",
-		"contains",
-		"not_contains",
-		"starts_with",
-		"ends_with",
-		"not_equals",
-		"in",
-		"not_in",
-	]),
-	value: z.union([z.string(), z.array(z.string())]),
-});
 
 type Filter = z.infer<typeof filterSchema>;
 
@@ -72,86 +68,18 @@ const goalOutputSchema = z.object({
 	filters: z.array(filterSchema).nullable(),
 	ignoreHistoricData: z.boolean(),
 	isActive: z.boolean(),
-	createdBy: z.string(),
+	createdBy: z.string().nullable(),
 	createdAt: z.coerce.date(),
 	updatedAt: z.coerce.date(),
 	deletedAt: z.nullable(z.coerce.date()),
 });
 
-const stepErrorInsightOutputSchema = z.object({
-	message: z.string(),
-	error_type: z.string(),
-	count: z.number(),
-});
-
-const stepAnalyticsOutputSchema = z.object({
-	step_number: z.number(),
-	step_name: z.string(),
-	users: z.number(),
-	total_users: z.number(),
-	conversion_rate: z.number(),
-	dropoffs: z.number(),
-	dropoff_rate: z.number(),
-	avg_time_to_complete: z.number(),
-	error_context_available: z.boolean(),
-	error_count: z.number(),
-	error_rate: z.number(),
-	top_errors: z.array(stepErrorInsightOutputSchema),
-});
-
-const timeSeriesPointSchema = z.object({
-	date: z.string(),
-	users: z.number(),
-	conversions: z.number(),
-	conversion_rate: z.number(),
-	dropoffs: z.number(),
-	avg_time: z.number(),
-});
-
-const goalAnalyticsOutputSchema = z.object({
-	overall_conversion_rate: z.number(),
-	total_users_entered: z.number(),
-	total_users_completed: z.number(),
-	avg_completion_time: z.number(),
-	avg_completion_time_formatted: z.string(),
-	biggest_dropoff_step: z.number(),
-	biggest_dropoff_rate: z.number(),
-	duration_available: z.boolean(),
-	steps_analytics: z.array(stepAnalyticsOutputSchema),
-	time_series: z.array(timeSeriesPointSchema).optional(),
-	error_insights: z.object({
-		available: z.boolean(),
-		total_errors: z.number(),
-		sessions_with_errors: z.number(),
-		dropoffs_with_errors: z.number(),
-		error_correlation_rate: z.number(),
-	}),
-});
-
 const goalAnalyticsResultSchema = z.discriminatedUnion("ok", [
-	z.object({ ok: z.literal(true), data: goalAnalyticsOutputSchema }),
+	z.object({ ok: z.literal(true), data: conversionAnalyticsOutputSchema }),
 	z.object({ ok: z.literal(false), error: z.string() }),
 ]);
 
 type GoalAnalyticsResult = z.infer<typeof goalAnalyticsResultSchema>;
-
-const getEffectiveStartDate = (
-	requestedStartDate: string,
-	createdAt: Date | null,
-	ignoreHistoricData: boolean
-): string => {
-	if (!(ignoreHistoricData && createdAt)) {
-		return requestedStartDate;
-	}
-
-	const createdDate = new Date(createdAt).toISOString().split("T")[0];
-	return new Date(requestedStartDate) > new Date(createdDate)
-		? requestedStartDate
-		: createdDate;
-};
-
-const getAnalyticsStepType = (type: "CUSTOM" | "EVENT" | "PAGE_VIEW") =>
-	type === "PAGE_VIEW" ? "PAGE_VIEW" : "EVENT";
 
 export const goalsRouter = {
 	list: publicProcedure
@@ -276,6 +204,12 @@ export const goalsRouter = {
 				})
 				.returning();
 
+			if (!newGoal) {
+				throw rpcError.internal(
+					"The goal could not be created. Try again in a moment."
+				);
+			}
+
 			await invalidateGoalsCache(input.websiteId);
 
 			return newGoal;
@@ -325,6 +259,10 @@ export const goalsRouter = {
 				.set({ ...updates, updatedAt: new Date() })
 				.where(and(eq(goals.id, id), isNull(goals.deletedAt)))
 				.returning();
+
+			if (!updatedGoal) {
+				throw rpcError.notFound("goal", id);
+			}
 
 			await invalidateGoalsCache(existingGoal.websiteId);
 			await queueDefinitionChangeRechecks({
@@ -388,7 +326,7 @@ export const goalsRouter = {
 		})
 		.input(goalAnalyticsInputSchema)
 		.output(
-			goalAnalyticsOutputSchema.extend({
+			conversionAnalyticsOutputSchema.extend({
 				measurement: insightMeasurementSchema,
 				savedDefinition: insightMeasurementSchema.shape.definition,
 				cohort: analyticsCohortSchema.optional(),
@@ -423,7 +361,7 @@ export const goalsRouter = {
 			const combinedFilters = [
 				...(input.filters ?? []),
 				...(input.cohort?.filters ?? []),
-				...((goal.filters as Filter[]) || []),
+				...(goal.filters ?? []),
 			];
 			const measurement = insightMeasurementSchema.parse({
 				websiteId: input.websiteId,
@@ -437,33 +375,22 @@ export const goalsRouter = {
 				key: `analytics:${JSON.stringify(measurement)}`,
 				ttl: ANALYTICS_CACHE_TTL,
 				tables: ["goals"],
-				queryFn: async () => {
-					const steps: AnalyticsStep[] = [
-						{
-							step_number: 1,
-							type: getAnalyticsStepType(goal.type),
-							target: goal.target,
-							name: goal.name,
-						},
-					];
-
-					const totalWebsiteUsers = await getTotalWebsiteUsers(
-						input.websiteId,
-						effectiveStartDate,
-						endDate,
-						combinedFilters
-					);
-					return await processGoalAnalytics(
-						steps,
+				queryFn: async () =>
+					await processGoalAnalytics(
+						toAnalyticsSteps([goal]),
 						combinedFilters,
 						{
 							websiteId: input.websiteId,
 							startDate: effectiveStartDate,
 							endDate: `${endDate} 23:59:59`,
 						},
-						totalWebsiteUsers
-					);
-				},
+						getTotalWebsiteUsers(
+							input.websiteId,
+							effectiveStartDate,
+							endDate,
+							combinedFilters
+						)
+					),
 			});
 			return {
 				...analytics,
@@ -522,66 +449,99 @@ export const goalsRouter = {
 				}
 				return pending;
 			};
-			const results = await Promise.all(
-				goalsList.map(async (goal): Promise<[string, GoalAnalyticsResult]> => {
-					const effectiveStartDate = getEffectiveStartDate(
-						startDate,
-						goal.createdAt,
-						goal.ignoreHistoricData
-					);
+			const analyticsByGoal: Record<string, GoalAnalyticsResult> = {};
 
-					const steps: AnalyticsStep[] = [
+			const runGoalIndividually = async (
+				goal: (typeof goalsList)[number],
+				combinedFilters: Filter[]
+			): Promise<void> => {
+				const effectiveStartDate = getEffectiveStartDate(
+					startDate,
+					goal.createdAt,
+					goal.ignoreHistoricData
+				);
+				try {
+					const analytics = await processGoalAnalytics(
+						toAnalyticsSteps([goal]),
+						combinedFilters,
 						{
-							step_number: 1,
-							type: getAnalyticsStepType(goal.type),
-							target: goal.target,
-							name: goal.name,
+							websiteId: input.websiteId,
+							startDate: effectiveStartDate,
+							endDate: `${endDate} 23:59:59`,
 						},
-					];
+						memoizedTotalUsers(effectiveStartDate, combinedFilters)
+					);
+					analyticsByGoal[goal.id] = { ok: true, data: analytics };
+				} catch (error) {
+					logger.error(
+						{
+							...getErrorLogFields(error),
+							goalId: goal.id,
+							websiteId: input.websiteId,
+						},
+						"Failed to process goal analytics"
+					);
+					analyticsByGoal[goal.id] = {
+						ok: false,
+						error: "Failed to process goal analytics",
+					};
+				}
+			};
 
-					const filters = (goal.filters as Filter[]) || [];
-					const combinedFilters = [...requestFilters, ...filters];
-
-					try {
-						const totalUsers = await memoizedTotalUsers(
-							effectiveStartDate,
-							combinedFilters
-						);
-						const analytics = await processGoalAnalytics(
-							steps,
-							combinedFilters,
-							{
-								websiteId: input.websiteId,
-								startDate: effectiveStartDate,
-								endDate: `${endDate} 23:59:59`,
-							},
-							totalUsers
-						);
-						return [goal.id, { ok: true, data: analytics }];
-					} catch (error) {
-						logger.error(
-							{
-								...getErrorLogFields(error),
-								goalId: goal.id,
-								websiteId: input.websiteId,
-							},
-							"Failed to process goal analytics"
-						);
-						return [
-							goal.id,
-							{
-								ok: false,
-								error: "Failed to process goal analytics",
-							},
-						];
-					}
-				})
+			const { batchChunks, individualGoals } = groupGoalsForBulkAnalytics(
+				goalsList,
+				requestFilters,
+				startDate,
+				BATCH_CHUNK_SIZE
 			);
 
-			const analyticsByGoal: Record<string, GoalAnalyticsResult> = {};
-			for (const [goalId, result] of results) {
-				analyticsByGoal[goalId] = result;
-			}
+			await Promise.all([
+				...batchChunks.map(
+					async ({ effectiveStartDate, goals: chunkGoals }) => {
+						try {
+							const [totalUsers, completionsByStep] = await Promise.all([
+								memoizedTotalUsers(effectiveStartDate, []),
+								processGoalsConversionCountsBatch(
+									toAnalyticsSteps(chunkGoals),
+									{
+										websiteId: input.websiteId,
+										startDate: effectiveStartDate,
+										endDate: `${endDate} 23:59:59`,
+									}
+								),
+							]);
+
+							for (const [index, goal] of chunkGoals.entries()) {
+								analyticsByGoal[goal.id] = {
+									ok: true,
+									data: buildGoalAnalyticsResult(
+										goal.name,
+										completionsByStep.get(index + 1) ?? 0,
+										totalUsers
+									),
+								};
+							}
+						} catch (error) {
+							logger.error(
+								{
+									...getErrorLogFields(error),
+									websiteId: input.websiteId,
+									effectiveStartDate,
+									goalIds: chunkGoals.map((goal) => goal.id),
+								},
+								"Batched goal analytics query failed; falling back to per-goal queries"
+							);
+							await Promise.all(
+								chunkGoals.map((goal) => runGoalIndividually(goal, []))
+							);
+						}
+					}
+				),
+				...individualGoals.map(({ goal, combinedFilters }) =>
+					runGoalIndividually(goal, combinedFilters)
+				),
+			]);
+
 			return analyticsByGoal;
 		}),
 };

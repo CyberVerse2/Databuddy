@@ -1,5 +1,6 @@
 import { createClient, type ResponseJSON } from "@clickhouse/client";
 import type { NodeClickHouseClientConfigOptions } from "@clickhouse/client/dist/config";
+import { dataUrl, isLoopbackHost } from "@databuddy/env/app";
 import { finalizeDeliveryTables } from "./logical-reads";
 export const TABLE_NAMES = {
 	events: "analytics.events",
@@ -7,10 +8,34 @@ export const TABLE_NAMES = {
 	blocked_traffic: "analytics.blocked_traffic",
 	error_spans: "analytics.error_spans",
 	web_vitals_spans: "analytics.web_vitals_spans",
+	engagement_spans: "analytics.engagement_spans",
 	custom_events: "analytics.custom_events",
 	ai_traffic_spans: "analytics.ai_traffic_spans",
+	mcp_spans: "analytics.mcp_spans",
 	link_visits: "analytics.link_visits",
 };
+
+// Warn instead of throwing: every service imports this module, and a half-set
+// pair keeps working until Cloudflare Access is enforced on ch-cluster.
+export function clickHouseAccessHeaders(
+	env: Record<string, string | undefined> = process.env
+): Record<string, string> | undefined {
+	const clientId = env.CLICKHOUSE_ACCESS_CLIENT_ID?.trim();
+	const clientSecret = env.CLICKHOUSE_ACCESS_CLIENT_SECRET?.trim();
+	if (!(clientId || clientSecret)) {
+		return;
+	}
+	if (!(clientId && clientSecret)) {
+		console.warn(
+			"[db] ClickHouse Access is half-configured: set both CLICKHOUSE_ACCESS_CLIENT_ID and CLICKHOUSE_ACCESS_CLIENT_SECRET; sending no Access headers"
+		);
+		return;
+	}
+	return {
+		"CF-Access-Client-Id": clientId,
+		"CF-Access-Client-Secret": clientSecret,
+	};
+}
 
 export const CLICKHOUSE_OPTIONS: NodeClickHouseClientConfigOptions = {
 	max_open_connections: 64,
@@ -23,6 +48,7 @@ export const CLICKHOUSE_OPTIONS: NodeClickHouseClientConfigOptions = {
 		request: true,
 		response: true,
 	},
+	http_headers: clickHouseAccessHeaders(),
 };
 
 export const FINAL_READ_SETTINGS = {
@@ -57,18 +83,18 @@ function assertLoopbackForIntegrationTests(url: string | undefined): void {
 	if (process.env.CLICKHOUSE_INTEGRATION_TESTS !== "true") {
 		return;
 	}
-	const hostname = url ? new URL(url).hostname : "";
-	if (!["localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname)) {
+	if (!(url && isLoopbackHost(url))) {
 		throw new Error(
-			`ClickHouse integration tests only run against a loopback server; CLICKHOUSE_URL host is "${hostname || "unset"}"`
+			`ClickHouse integration tests only run against a loopback server; CLICKHOUSE_URL host is "${url ? new URL(url).hostname : "unset"}"`
 		);
 	}
 }
 
-assertLoopbackForIntegrationTests(process.env.CLICKHOUSE_URL);
+const clickHouseUrl = dataUrl("CLICKHOUSE_URL");
+assertLoopbackForIntegrationTests(clickHouseUrl);
 
 const baseClient = createClient({
-	url: process.env.CLICKHOUSE_URL,
+	url: clickHouseUrl,
 	...CLICKHOUSE_OPTIONS,
 });
 
@@ -224,6 +250,7 @@ async function readJsonResponse<T>(
 }
 
 const CH_QUERY_MAX_MS = 25_000;
+const SCALAR_INT_TYPE = /^(?:Nullable\()?U?Int\d+\)?$/;
 
 async function chQueryWithMeta<T>(
 	query: string,
@@ -264,7 +291,9 @@ async function chQueryWithMeta<T>(
 	);
 
 	const intColumns = new Set(
-		(json.meta ?? []).filter((m) => m.type.includes("Int")).map((m) => m.name)
+		(json.meta ?? [])
+			.filter((m) => SCALAR_INT_TYPE.test(m.type))
+			.map((m) => m.name)
 	);
 	if (intColumns.size === 0) {
 		return json;

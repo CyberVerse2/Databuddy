@@ -92,10 +92,6 @@ export default function ErrorPage({
 
 			<div className="relative flex w-full max-w-sm flex-col items-center text-center">
 				<div className="relative mb-6">
-					<div
-						aria-hidden="true"
-						className="absolute inset-[-20px] rounded-full bg-[radial-gradient(circle,rgba(139,92,246,0.15)_0%,transparent_70%)]"
-					/>
 					<Branding
 						className="relative"
 						heightPx={72}
@@ -122,13 +118,13 @@ export default function ErrorPage({
 
 				<Button className="mt-6 w-full" onClick={() => reset()}>
 					<ArrowClockwiseIcon className="mr-2 size-4" />
-					Try Again
+					Try again
 				</Button>
 
 				<Link className="mt-3 w-full" href="/websites">
 					<Button className="w-full" variant="secondary">
 						<HouseIcon className="mr-2 size-4" />
-						Back to Websites
+						Back to websites
 					</Button>
 				</Link>
 			</div>

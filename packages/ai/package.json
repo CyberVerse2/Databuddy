@@ -8,6 +8,7 @@
     "./agent": "./src/agent/index.ts",
     "./agent/errors": "./src/agent/errors.ts",
     "./agent/feedback": "./src/agent/feedback.ts",
+    "./agent/render": "./src/agent/render.ts",
     "./agents/analytics": "./src/ai/agents/analytics.ts",
     "./agents/conversation": "./src/ai/agents/conversation.ts",
     "./agents/cache": "./src/ai/agents/cache.ts",
@@ -28,7 +29,9 @@
     "./lib/website-utils": "./src/lib/website-utils.ts",
     "./mcp/http": "./src/mcp/http.ts",
     "./mcp/tools": "./src/ai/mcp/tools.ts",
+    "./prompts/*": "./src/ai/prompts/*.ts",
     "./tools/toolkit": "./src/ai/tools/toolkit.ts",
+    "./tools/github-tools": "./src/ai/tools/github-tools.ts",
     "./tools/scrape-page": "./src/ai/tools/scrape-page.ts",
     "./tools/search-console": "./src/ai/tools/search-console.ts",
     "./tools/utils/oauth-token": "./src/ai/tools/utils/oauth-token.ts",
@@ -42,8 +45,8 @@
   ],
   "scripts": {
     "check-types": "tsc --noEmit",
-    "test": "bun test --isolate",
-    "test:stripe-revenue:e2e": "CLICKHOUSE_INTEGRATION_TESTS=true STRIPE_REVENUE_E2E=true bun test src/query/builders/stripe-revenue.e2e.integration.test.ts"
+    "test": "bun test --isolate --only-failures",
+    "test:integration": "BUSINESS_CONTEXT_INTEGRATION_TESTS=true MCP_OAUTH_INTEGRATION_TESTS=true REQUIRE_EMAIL_VERIFICATION=false CLICKHOUSE_INTEGRATION_TESTS=true STRIPE_REVENUE_E2E=true bun test --isolate --only-failures src/lib/business-context.test.ts src/ai/mcp/oauth-website-access.integration.test.ts src/query/builders/stripe-revenue.e2e.integration.test.ts"
   },
   "dependencies": {
     "@ai-sdk/provider": "^3.0.5",
@@ -57,7 +60,7 @@
     "@databuddy/services": "workspace:*",
     "@databuddy/shared": "workspace:*",
     "@databuddy/validation": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@modelcontextprotocol/server": "^2.3.1",
     "@orpc/server": "^1.14.0",
     "@tokenlens/models": "catalog:",
     "ai": "^6.0.188",

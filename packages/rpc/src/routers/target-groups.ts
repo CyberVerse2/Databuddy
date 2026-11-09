@@ -7,10 +7,7 @@ import { randomUUIDv7 } from "bun";
 import { z } from "zod";
 import { rpcError } from "../errors";
 import { publicProcedure, trackedProcedure } from "../orpc";
-import {
-	withPublicWorkspace,
-	withWorkspace,
-} from "../procedures/with-workspace";
+import { withWorkspace } from "../procedures/with-workspace";
 import { invalidateFlagEvaluationCaches } from "../utils/flags";
 import { scopedCacheKey } from "../utils/scoped-cache-key";
 
@@ -53,19 +50,11 @@ const deleteSchema = z.object({
 
 const targetGroupOutputSchema = z.record(z.string(), z.unknown());
 
-function requireAuthedTargetGroupRead(workspace: { tier: "authed" | "demo" }) {
-	if (workspace.tier === "demo") {
-		throw rpcError.unauthorized(
-			"Target group definitions require authenticated organization access"
-		);
-	}
-}
-
 export const targetGroupsRouter = {
 	list: publicProcedure
 		.route({
 			description:
-				"Returns all target groups for a website. Requires website read permission.",
+				"Returns all target groups for a website. Requires feature flag read permission.",
 			method: "POST",
 			path: "/target-groups/list",
 			summary: "List target groups",
@@ -74,12 +63,11 @@ export const targetGroupsRouter = {
 		.input(listSchema)
 		.output(z.array(targetGroupOutputSchema))
 		.handler(async ({ context, input }) => {
-			const workspace = await withPublicWorkspace(context, {
+			const workspace = await withWorkspace(context, {
 				websiteId: input.websiteId,
+				resource: "flag",
 				permissions: ["read"],
 			});
-
-			requireAuthedTargetGroupRead(workspace);
 
 			return targetGroupsCache.withCache({
 				key: scopedCacheKey("list", workspace, `website:${input.websiteId}`),
@@ -135,6 +123,12 @@ export const targetGroupsRouter = {
 				})
 				.returning();
 
+			if (!newGroup) {
+				throw rpcError.internal(
+					"The target group could not be created. Try again in a moment."
+				);
+			}
+
 			await targetGroupsCache.invalidateByTables(["target_groups"]);
 
 			return newGroup;
@@ -152,7 +146,7 @@ export const targetGroupsRouter = {
 		.input(updateSchema)
 		.output(targetGroupOutputSchema)
 		.handler(async ({ context, input }) => {
-			const existingGroup = await context.db
+			const [group] = await context.db
 				.select()
 				.from(targetGroups)
 				.where(
@@ -160,11 +154,9 @@ export const targetGroupsRouter = {
 				)
 				.limit(1);
 
-			if (existingGroup.length === 0) {
+			if (!group) {
 				throw rpcError.notFound("Target group", input.id);
 			}
-
-			const group = existingGroup[0];
 
 			await withWorkspace(context, {
 				websiteId: group.websiteId,
@@ -181,6 +173,10 @@ export const targetGroupsRouter = {
 				})
 				.where(and(eq(targetGroups.id, id), isNull(targetGroups.deletedAt)))
 				.returning();
+
+			if (!updatedGroup) {
+				throw rpcError.notFound("Target group", id);
+			}
 
 			await targetGroupsCache.invalidateByTables(["target_groups"]);
 			await invalidateFlagEvaluationCaches(group.websiteId);
@@ -200,7 +196,7 @@ export const targetGroupsRouter = {
 		.input(deleteSchema)
 		.output(successOutputSchema)
 		.handler(async ({ context, input }) => {
-			const existingGroup = await context.db
+			const [group] = await context.db
 				.select()
 				.from(targetGroups)
 				.where(
@@ -208,11 +204,9 @@ export const targetGroupsRouter = {
 				)
 				.limit(1);
 
-			if (existingGroup.length === 0) {
+			if (!group) {
 				throw rpcError.notFound("Target group", input.id);
 			}
-
-			const group = existingGroup[0];
 
 			await withWorkspace(context, {
 				websiteId: group.websiteId,

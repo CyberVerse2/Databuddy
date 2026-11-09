@@ -37,12 +37,10 @@ export function createRedisModuleMock(
 			organizationRole: "rpc:org_role",
 			slackChannelBinding: "slack-channel-binding",
 			slackIntegrationByTeam: "slack-integration-by-team",
-			statusPage: "status-page",
+			statusPage: "status-page-v2",
 			userPreferences: "user-prefs",
 			websiteById: "website_by_id",
 			websiteCache: "website-cache",
-			websiteDomain: "website-domain",
-			websiteDomainsBatch: "website-domains-batch",
 			websiteWithOwner: "website_with_owner_v2",
 		},
 		cacheTags: {
@@ -54,7 +52,6 @@ export function createRedisModuleMock(
 				`flag-user:${clientId}:${userId}`,
 			organization: (organizationId: string) =>
 				`organization:${organizationId}`,
-			website: (websiteId: string) => `website:${websiteId}`,
 		},
 		cacheable: <T extends (...args: never[]) => unknown>(fn: T) => fn,
 		clearActiveStream: mock(async () => undefined),

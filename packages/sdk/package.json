@@ -1,7 +1,7 @@
 {
   "name": "@databuddy/sdk",
-  "version": "2.6.0",
-  "description": "Official Databuddy Analytics SDK",
+  "version": "3.2.1",
+  "description": "Databuddy SDK: open-source, cookieless product analytics with custom events, feature flags, and error tracking for React, Next.js, Vue, and Node.js.",
   "main": "./dist/core/index.mjs",
   "types": "./dist/core/index.d.ts",
   "license": "MIT",
@@ -10,6 +10,7 @@
   "type": "module",
   "scripts": {
     "build": "unbuild",
+    "prepack": "bun run build",
     "test": "bun run test:unit",
     "test:all": "bun run test:unit && bun run test:e2e",
     "test:unit": "bun test tests/*.test.ts",
@@ -21,6 +22,7 @@
     "check-types": "tsc --noEmit"
   },
   "devDependencies": {
+    "@databuddy/shared": "workspace:*",
     "@playwright/test": "^1.58.2",
     "@types/bun": "catalog:",
     "@types/node": "^26.0.0",
@@ -58,6 +60,14 @@
     "./node": {
       "types": "./dist/node/index.d.ts",
       "import": "./dist/node/index.mjs"
+    },
+    "./agents": {
+      "types": "./dist/agents/index.d.ts",
+      "import": "./dist/agents/index.mjs"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.mjs"
     }
   },
   "files": [
@@ -65,16 +75,24 @@
   ],
   "keywords": [
     "analytics",
+    "product-analytics",
+    "web-analytics",
+    "cookieless",
+    "feature-flags",
+    "error-tracking",
     "tracking",
     "databuddy",
     "sdk",
     "react",
-    "vue"
+    "nextjs",
+    "vue",
+    "node",
+    "mcp"
   ],
   "homepage": "https://databuddy.cc",
   "repository": {
     "type": "git",
-    "url": "https://github.com/databuddy-analytics/databuddy.git"
+    "url": "https://github.com/databuddy-analytics/Databuddy.git"
   },
   "bugs": {
     "type": "git",

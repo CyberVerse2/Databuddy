@@ -3,7 +3,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useState } from "react";
-import { toast } from "sonner";
 import { orpc } from "@/lib/orpc";
 import { cn } from "@/lib/utils";
 import {
@@ -15,24 +14,17 @@ import {
 } from "@databuddy/ui/icons";
 import { Badge, Button, Field, Input } from "@databuddy/ui";
 import { Switch } from "@databuddy/ui/client";
+import { showErrorToast } from "@/lib/user-facing-error";
 
-type ToggleKey = "hideUrl" | "hideUptimePercentage" | "hideLatency";
+const TOGGLES = [
+	{ key: "hideUrl", id: "hide-url", label: "Hide URL" },
+	{ key: "hideUptimePercentage", id: "hide-uptime", label: "Hide uptime" },
+	{ key: "hideLatency", id: "hide-latency", label: "Hide latency" },
+] as const;
 
-export interface StatusPageMonitor {
-	displayName: string | null;
-	hideLatency: boolean;
-	hideUptimePercentage: boolean;
-	hideUrl: boolean;
-	id: string;
-	statusPageId: string;
-	uptimeSchedule: {
-		id: string;
-		name: string | null;
-		url: string | null;
-		isPaused: boolean;
-	};
-	uptimeScheduleId: string;
-}
+type StatusPageMonitor = Awaited<
+	ReturnType<typeof orpc.statusPage.get.call>
+>["monitors"][number];
 
 interface StatusPageMonitorRowProps {
 	monitor: StatusPageMonitor;
@@ -55,6 +47,9 @@ export function StatusPageMonitorRow({
 
 	const updateSettingsMutation = useMutation({
 		...orpc.statusPage.updateMonitorSettings.mutationOptions(),
+		onError: (error) =>
+			showErrorToast(error, "Failed to update monitor settings"),
+		meta: { suppressGlobalErrorToast: true },
 	});
 
 	const schedule = monitor.uptimeSchedule;
@@ -62,39 +57,32 @@ export function StatusPageMonitorRow({
 	const resolvedName =
 		monitor.displayName || schedule.name || schedule.url || "Unnamed";
 
-	type MonitorPatch = Partial<
-		Pick<
-			StatusPageMonitor,
-			"hideUrl" | "hideUptimePercentage" | "hideLatency" | "displayName"
+	const updateSettings = async (
+		patch: Partial<
+			Pick<
+				StatusPageMonitor,
+				"hideUrl" | "hideUptimePercentage" | "hideLatency" | "displayName"
+			>
 		>
-	>;
-
-	const optimisticUpdate = (patch: MonitorPatch) => {
-		queryClient.setQueryData(queryKey, (old) => {
-			if (!old) {
-				return old;
-			}
-			return {
-				...old,
-				monitors: old.monitors.map((m) =>
-					m.id === monitor.id ? { ...m, ...patch } : m
-				),
-			};
-		});
-	};
-
-	const handleToggle = async (key: ToggleKey, value: boolean) => {
+	) => {
 		const previous = queryClient.getQueryData(queryKey);
-		optimisticUpdate({ [key]: value });
-
+		queryClient.setQueryData(queryKey, (old) =>
+			old
+				? {
+						...old,
+						monitors: old.monitors.map((m) =>
+							m.id === monitor.id ? { ...m, ...patch } : m
+						),
+					}
+				: old
+		);
 		try {
 			await updateSettingsMutation.mutateAsync({
 				monitorId: monitor.id,
-				[key]: value,
+				...patch,
 			});
 		} catch {
 			queryClient.setQueryData(queryKey, previous);
-			toast.error("Failed to update setting");
 		}
 	};
 
@@ -117,19 +105,8 @@ export function StatusPageMonitorRow({
 			return;
 		}
 
-		const previous = queryClient.getQueryData(queryKey);
-		optimisticUpdate({ displayName: newName });
 		setIsEditing(false);
-
-		try {
-			await updateSettingsMutation.mutateAsync({
-				monitorId: monitor.id,
-				displayName: newName,
-			});
-		} catch {
-			queryClient.setQueryData(queryKey, previous);
-			toast.error("Failed to rename monitor");
-		}
+		await updateSettings({ displayName: newName });
 	};
 
 	const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -159,7 +136,7 @@ export function StatusPageMonitorRow({
 					"flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/60",
 					isPaused
 						? "bg-muted text-muted-foreground"
-						: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+						: "bg-success/10 text-success"
 				)}
 			>
 				<HeartbeatIcon className="size-4" />
@@ -232,45 +209,21 @@ export function StatusPageMonitorRow({
 			</div>
 
 			<div className="relative hidden items-center gap-5 lg:flex">
-				<div className="flex items-center gap-2">
-					<Switch
-						checked={monitor.hideUrl}
-						id={`hide-url-${monitor.id}`}
-						onCheckedChange={(v) => handleToggle("hideUrl", v)}
-					/>
-					<Field.Label
-						className="cursor-pointer font-normal text-muted-foreground text-xs"
-						htmlFor={`hide-url-${monitor.id}`}
-					>
-						Hide URL
-					</Field.Label>
-				</div>
-				<div className="flex items-center gap-2">
-					<Switch
-						checked={monitor.hideUptimePercentage}
-						id={`hide-uptime-${monitor.id}`}
-						onCheckedChange={(v) => handleToggle("hideUptimePercentage", v)}
-					/>
-					<Field.Label
-						className="cursor-pointer font-normal text-muted-foreground text-xs"
-						htmlFor={`hide-uptime-${monitor.id}`}
-					>
-						Hide Uptime
-					</Field.Label>
-				</div>
-				<div className="flex items-center gap-2">
-					<Switch
-						checked={monitor.hideLatency}
-						id={`hide-latency-${monitor.id}`}
-						onCheckedChange={(v) => handleToggle("hideLatency", v)}
-					/>
-					<Field.Label
-						className="cursor-pointer font-normal text-muted-foreground text-xs"
-						htmlFor={`hide-latency-${monitor.id}`}
-					>
-						Hide Latency
-					</Field.Label>
-				</div>
+				{TOGGLES.map(({ key, id, label }) => (
+					<div className="flex items-center gap-2" key={key}>
+						<Switch
+							checked={monitor[key]}
+							id={`${id}-${monitor.id}`}
+							onCheckedChange={(v) => updateSettings({ [key]: v })}
+						/>
+						<Field.Label
+							className="cursor-pointer font-normal text-muted-foreground text-xs"
+							htmlFor={`${id}-${monitor.id}`}
+						>
+							{label}
+						</Field.Label>
+					</div>
+				))}
 			</div>
 
 			<Button

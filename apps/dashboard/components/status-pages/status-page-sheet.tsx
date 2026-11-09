@@ -1,12 +1,19 @@
 "use client";
 
+import { RESERVED_STATUS_PAGE_SLUGS } from "@databuddy/shared/uptime";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { toast } from "sonner";
+import { showErrorToast } from "@/lib/user-facing-error";
 import { z } from "zod";
+import {
+	MAX_UPLOAD_BYTES,
+	UPLOAD_CONTENT_TYPES,
+} from "@databuddy/shared/uploads";
 import { useOrganizationsContext } from "@/components/providers/organizations-provider";
+import type { StatusPage } from "@/components/status-pages/status-page-row";
 import { orpc } from "@/lib/orpc";
 import {
 	Button,
@@ -16,12 +23,11 @@ import {
 	SegmentedControl,
 	Textarea,
 } from "@databuddy/ui";
-import { Sheet } from "@databuddy/ui/client";
+import { FileDrop, Sheet } from "@databuddy/ui/client";
 
-const URL_REGEX = /^https?:\/\/.+/;
+const HTTPS_URL_REGEX = /^https:\/\/.+/;
 
-const UPLOAD_ACCEPT =
-	"image/png,image/jpeg,image/webp,image/svg+xml,image/x-icon";
+const UPLOAD_ACCEPT = UPLOAD_CONTENT_TYPES.join(",");
 
 const ASSET_FIELDS = {
 	logo: { label: "Logo", field: "logoUrl" },
@@ -30,45 +36,44 @@ const ASSET_FIELDS = {
 
 type AssetKind = keyof typeof ASSET_FIELDS;
 
-function AssetUploadButton({
-	busy,
-	onPickAction,
-	uploading,
-}: {
-	busy: boolean;
-	onPickAction: (file: File) => void;
-	uploading: boolean;
-}) {
-	const inputRef = useRef<HTMLInputElement>(null);
-
-	return (
-		<>
-			{/* policy-ignore dashboard/no-raw-interactive-html: a hidden native file input is the only way to open the OS file picker; @databuddy/ui has no file input component */}
-			<input
-				accept={UPLOAD_ACCEPT}
-				className="hidden"
-				onChange={(event) => {
-					const file = event.target.files?.[0];
-					event.target.value = "";
-					if (file) {
-						onPickAction(file);
-					}
-				}}
-				ref={inputRef}
-				type="file"
-			/>
-			<Button
-				disabled={busy}
-				onClick={() => inputRef.current?.click()}
-				size="sm"
-				type="button"
-				variant="secondary"
-			>
-				{uploading ? "Uploading" : "Upload"}
-			</Button>
-		</>
+const optionalHttpsUrl = z
+	.string()
+	.refine(
+		(v) => v === "" || HTTPS_URL_REGEX.test(v),
+		"Must start with https://"
 	);
-}
+
+const URL_FIELDS = [
+	{
+		name: "logoUrl",
+		label: "Logo",
+		placeholder: "https://example.com/logo.svg",
+		asset: "logo",
+		description:
+			"Displayed in the navbar and page header. Drop or upload a file, or paste an https URL.",
+	},
+	{
+		name: "faviconUrl",
+		label: "Favicon",
+		placeholder: "https://example.com/favicon.ico",
+		asset: "favicon",
+		description: null,
+	},
+	{
+		name: "websiteUrl",
+		label: "Website URL",
+		placeholder: "https://example.com",
+		asset: null,
+		description: "Logo and name link to this URL",
+	},
+	{
+		name: "supportUrl",
+		label: "Support URL",
+		placeholder: "https://example.com/support",
+		asset: null,
+		description: 'Shown as a "Get Support" link in the navbar',
+	},
+] as const;
 
 const statusPageFormSchema = z.object({
 	name: z
@@ -82,23 +87,19 @@ const statusPageFormSchema = z.object({
 		.regex(
 			/^[a-z0-9-]+$/,
 			"Slug must only contain lowercase letters, numbers, and dashes"
+		)
+		.refine(
+			(slug) => !RESERVED_STATUS_PAGE_SLUGS.has(slug),
+			"This slug is reserved"
 		),
 	description: z
 		.string()
 		.max(500, "Description must be 500 characters or fewer")
 		.optional(),
-	logoUrl: z
-		.string()
-		.refine((v) => v === "" || URL_REGEX.test(v), "Must be a valid URL"),
-	faviconUrl: z
-		.string()
-		.refine((v) => v === "" || URL_REGEX.test(v), "Must be a valid URL"),
-	websiteUrl: z
-		.string()
-		.refine((v) => v === "" || URL_REGEX.test(v), "Must be a valid URL"),
-	supportUrl: z
-		.string()
-		.refine((v) => v === "" || URL_REGEX.test(v), "Must be a valid URL"),
+	logoUrl: optionalHttpsUrl,
+	faviconUrl: optionalHttpsUrl,
+	websiteUrl: optionalHttpsUrl,
+	supportUrl: optionalHttpsUrl,
 	theme: z.enum(["system", "light", "dark"]),
 });
 
@@ -114,17 +115,18 @@ interface StatusPageSheetProps {
 	onCloseAction: (open: boolean) => void;
 	onSaveAction?: () => void;
 	open: boolean;
-	statusPage?: {
-		description?: string | null;
-		faviconUrl?: string | null;
-		id: string;
-		logoUrl?: string | null;
-		name: string;
-		slug: string;
-		supportUrl?: string | null;
-		theme?: string | null;
-		websiteUrl?: string | null;
-	} | null;
+	statusPage?: Pick<
+		StatusPage,
+		| "description"
+		| "faviconUrl"
+		| "id"
+		| "logoUrl"
+		| "name"
+		| "slug"
+		| "supportUrl"
+		| "theme"
+		| "websiteUrl"
+	> | null;
 }
 
 export function StatusPageSheet({
@@ -150,15 +152,26 @@ export function StatusPageSheet({
 
 	const uploadUrlMutation = useMutation({
 		...orpc.statusPage.createAssetUploadUrl.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
 	});
 	const [uploading, setUploading] = useState<AssetKind | null>(null);
+	const organizationId = activeOrganization?.id ?? activeOrganizationId ?? null;
 
 	const uploadAsset = async (asset: AssetKind, file: File) => {
-		const organizationId =
-			activeOrganization?.id ?? activeOrganizationId ?? null;
-
 		if (!organizationId) {
-			toast.error("No active organization selected");
+			toast.error("Select an organization before uploading files.");
+			return;
+		}
+
+		const contentType = UPLOAD_CONTENT_TYPES.find((type) => type === file.type);
+
+		if (!contentType) {
+			toast.error("Use a PNG, JPEG, WebP, or ICO file.");
+			return;
+		}
+
+		if (file.size > MAX_UPLOAD_BYTES) {
+			toast.error("Use a file smaller than 2 MB.");
 			return;
 		}
 
@@ -169,18 +182,19 @@ export function StatusPageSheet({
 			const { publicUrl, uploadUrl } = await uploadUrlMutation.mutateAsync({
 				asset,
 				contentLength: file.size,
-				contentType: file.type,
+				contentType,
 				organizationId,
 			});
 
 			const response = await fetch(uploadUrl, {
 				body: file,
-				headers: { "Content-Type": file.type },
+				headers: { "Content-Type": contentType },
 				method: "PUT",
-			});
+			}).catch(() => null);
 
-			if (!response.ok) {
-				throw new Error(`Upload failed with status ${response.status}`);
+			if (!response?.ok) {
+				toast.error("Failed to upload file");
+				return;
 			}
 
 			form.setValue(field, publicUrl, {
@@ -189,9 +203,7 @@ export function StatusPageSheet({
 			});
 			toast.success(`${label} uploaded`);
 		} catch (error) {
-			toast.error(
-				error instanceof Error ? error.message : "Upload failed, try again"
-			);
+			showErrorToast(error, "Failed to upload file");
 		} finally {
 			setUploading(null);
 		}
@@ -199,58 +211,49 @@ export function StatusPageSheet({
 
 	const createMutation = useMutation({
 		...orpc.statusPage.create.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
 	});
 	const updateMutation = useMutation({
 		...orpc.statusPage.update.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
 	});
 
 	const handleSubmit = async () => {
 		const data = form.getValues();
-		const urlOrNull = (v: string | undefined) =>
-			v && v.trim() !== "" ? v : null;
+		const details = {
+			name: data.name,
+			slug: data.slug,
+			description: data.description,
+			logoUrl: urlOrNull(data.logoUrl),
+			faviconUrl: urlOrNull(data.faviconUrl),
+			websiteUrl: urlOrNull(data.websiteUrl),
+			supportUrl: urlOrNull(data.supportUrl),
+			theme: data.theme,
+		};
 
 		try {
-			if (isEditing && statusPage) {
+			if (statusPage) {
 				await updateMutation.mutateAsync({
 					statusPageId: statusPage.id,
-					name: data.name,
-					slug: data.slug,
-					description: data.description,
-					logoUrl: urlOrNull(data.logoUrl),
-					faviconUrl: urlOrNull(data.faviconUrl),
-					websiteUrl: urlOrNull(data.websiteUrl),
-					supportUrl: urlOrNull(data.supportUrl),
-					theme: data.theme,
+					...details,
 				});
-				toast.success("Status page updated");
 			} else {
-				const resolvedOrganizationId =
-					activeOrganization?.id ?? activeOrganizationId ?? null;
-
-				if (!resolvedOrganizationId) {
-					toast.error("No active organization selected");
+				if (!organizationId) {
+					toast.error("Select an organization before creating a status page.");
 					return;
 				}
-
-				await createMutation.mutateAsync({
-					organizationId: resolvedOrganizationId,
-					name: data.name,
-					slug: data.slug,
-					description: data.description,
-					logoUrl: urlOrNull(data.logoUrl),
-					faviconUrl: urlOrNull(data.faviconUrl),
-					websiteUrl: urlOrNull(data.websiteUrl),
-					supportUrl: urlOrNull(data.supportUrl),
-					theme: data.theme,
-				});
-				toast.success("Status page created");
+				await createMutation.mutateAsync({ organizationId, ...details });
 			}
+			toast.success(`Status page ${statusPage ? "updated" : "created"}`);
 			onSaveAction?.();
 			onCloseAction(false);
 		} catch (error) {
-			const errorMessage =
-				error instanceof Error ? error.message : "Failed to save status page";
-			toast.error(errorMessage);
+			showErrorToast(
+				error,
+				statusPage
+					? "Failed to update status page"
+					: "Failed to create status page"
+			);
 		}
 	};
 
@@ -262,7 +265,7 @@ export function StatusPageSheet({
 				<Sheet.Close />
 				<Sheet.Header>
 					<Sheet.Title>
-						{isEditing ? "Edit Status Page" : "Create Status Page"}
+						{isEditing ? "Edit status page" : "Create status page"}
 					</Sheet.Title>
 					<Sheet.Description>
 						{isEditing
@@ -333,94 +336,53 @@ export function StatusPageSheet({
 								</p>
 							</div>
 
-							<Controller
-								control={form.control}
-								name="logoUrl"
-								render={({ field, fieldState }) => (
-									<Field error={!!fieldState.error}>
-										<Field.Label>Logo</Field.Label>
-										<div className="flex items-center gap-2">
-											<Input
-												placeholder="https://example.com/logo.svg"
-												{...field}
-											/>
-											<AssetUploadButton
-												busy={uploading !== null}
-												onPickAction={(file) => uploadAsset("logo", file)}
-												uploading={uploading === "logo"}
-											/>
-										</div>
-										<Field.Description>
-											Displayed in the navbar and page header. Upload a file or
-											paste an https URL.
-										</Field.Description>
-										{fieldState.error && (
-											<Field.Error>{fieldState.error.message}</Field.Error>
+							{URL_FIELDS.map(
+								({ name, label, placeholder, asset, description }) => (
+									<Controller
+										control={form.control}
+										key={name}
+										name={name}
+										render={({ field, fieldState }) => (
+											<Field error={!!fieldState.error}>
+												<Field.Label>{label}</Field.Label>
+												{asset ? (
+													<FileDrop
+														accept={UPLOAD_ACCEPT}
+														disabled={uploading !== null}
+														label={`Upload ${label.toLowerCase()}`}
+														onFileAction={(file) => uploadAsset(asset, file)}
+													>
+														{({ open }) => (
+															<div className="flex items-center gap-2">
+																<Input placeholder={placeholder} {...field} />
+																<Button
+																	disabled={uploading !== null}
+																	onClick={open}
+																	size="sm"
+																	type="button"
+																	variant="secondary"
+																>
+																	{uploading === asset
+																		? "Uploading…"
+																		: "Upload"}
+																</Button>
+															</div>
+														)}
+													</FileDrop>
+												) : (
+													<Input placeholder={placeholder} {...field} />
+												)}
+												{description && (
+													<Field.Description>{description}</Field.Description>
+												)}
+												{fieldState.error && (
+													<Field.Error>{fieldState.error.message}</Field.Error>
+												)}
+											</Field>
 										)}
-									</Field>
-								)}
-							/>
-
-							<Controller
-								control={form.control}
-								name="faviconUrl"
-								render={({ field, fieldState }) => (
-									<Field error={!!fieldState.error}>
-										<Field.Label>Favicon</Field.Label>
-										<div className="flex items-center gap-2">
-											<Input
-												placeholder="https://example.com/favicon.ico"
-												{...field}
-											/>
-											<AssetUploadButton
-												busy={uploading !== null}
-												onPickAction={(file) => uploadAsset("favicon", file)}
-												uploading={uploading === "favicon"}
-											/>
-										</div>
-										{fieldState.error && (
-											<Field.Error>{fieldState.error.message}</Field.Error>
-										)}
-									</Field>
-								)}
-							/>
-
-							<Controller
-								control={form.control}
-								name="websiteUrl"
-								render={({ field, fieldState }) => (
-									<Field error={!!fieldState.error}>
-										<Field.Label>Website URL</Field.Label>
-										<Input placeholder="https://example.com" {...field} />
-										<Field.Description>
-											Logo and name link to this URL
-										</Field.Description>
-										{fieldState.error && (
-											<Field.Error>{fieldState.error.message}</Field.Error>
-										)}
-									</Field>
-								)}
-							/>
-
-							<Controller
-								control={form.control}
-								name="supportUrl"
-								render={({ field, fieldState }) => (
-									<Field error={!!fieldState.error}>
-										<Field.Label>Support URL</Field.Label>
-										<Input
-											placeholder="https://example.com/support"
-											{...field}
-										/>
-										<Field.Description>
-											Shown as a "Get Support" link in the navbar
-										</Field.Description>
-										{fieldState.error && (
-											<Field.Error>{fieldState.error.message}</Field.Error>
-										)}
-									</Field>
-								)}
-							/>
+									/>
+								)
+							)}
 						</div>
 
 						<Divider />
@@ -465,13 +427,17 @@ export function StatusPageSheet({
 							loading={isPending}
 							type="submit"
 						>
-							{isEditing ? "Update" : "Create"}
+							{isEditing ? "Save changes" : "Create status page"}
 						</Button>
 					</Sheet.Footer>
 				</form>
 			</Sheet.Content>
 		</Sheet>
 	);
+}
+
+function urlOrNull(value: string | undefined) {
+	return value && value.trim() !== "" ? value : null;
 }
 
 function buildDefaults(
@@ -485,6 +451,6 @@ function buildDefaults(
 		faviconUrl: sp?.faviconUrl ?? "",
 		websiteUrl: sp?.websiteUrl ?? "",
 		supportUrl: sp?.supportUrl ?? "",
-		theme: (sp?.theme as "system" | "light" | "dark") ?? "system",
+		theme: statusPageFormSchema.shape.theme.catch("system").parse(sp?.theme),
 	};
 }

@@ -1,7 +1,6 @@
 import { auth } from "@databuddy/auth";
 import { and, db, eq } from "@databuddy/db";
 import { account, member } from "@databuddy/db/schema";
-import { getOAuthTokenOrderBy } from "./oauth-token-ordering";
 
 const TOKEN_TTL_MS = 45 * 60 * 1000;
 const NEGATIVE_TTL_MS = 5 * 60 * 1000;
@@ -12,7 +11,7 @@ const SCOPE_SEPARATOR = /[\s,]+/;
 interface TokenCandidate {
 	accessToken: string | null;
 	accessTokenExpiresAt: Date | null;
-	providerAccountId: string;
+	accountId: string;
 	refreshToken: string | null;
 	scope: string | null;
 	userId: string;
@@ -35,7 +34,6 @@ function hasScope(scope: string | null, required: string): boolean {
 }
 
 async function resolveCandidateToken(
-	providerId: string,
 	candidate: TokenCandidate
 ): Promise<ResolvedToken | null> {
 	if (candidate.accessToken && !isExpired(candidate)) {
@@ -50,8 +48,7 @@ async function resolveCandidateToken(
 	try {
 		const refreshed = await auth.api.getAccessToken({
 			body: {
-				providerId,
-				accountId: candidate.providerAccountId,
+				accountId: candidate.accountId,
 				userId: candidate.userId,
 			},
 		});
@@ -67,19 +64,16 @@ async function resolveCandidateToken(
 	}
 }
 
-async function resolveOAuthToken(
+function listTokenCandidates(
 	providerId: string,
 	organizationId: string,
-	preferUserId?: string,
-	requiredScope?: string
-): Promise<ResolvedToken | null> {
-	const orderBy = getOAuthTokenOrderBy(preferUserId);
-
-	const candidates: TokenCandidate[] = await db
+	userId?: string
+): Promise<TokenCandidate[]> {
+	return db
 		.select({
+			accountId: account.id,
 			accessToken: account.accessToken,
 			accessTokenExpiresAt: account.accessTokenExpiresAt,
-			providerAccountId: account.accountId,
 			refreshToken: account.refreshToken,
 			scope: account.scope,
 			userId: account.userId,
@@ -89,17 +83,43 @@ async function resolveOAuthToken(
 		.where(
 			and(
 				eq(member.organizationId, organizationId),
-				eq(account.providerId, providerId)
+				eq(account.providerId, providerId),
+				userId ? eq(account.userId, userId) : eq(member.role, "owner")
 			)
 		)
-		.orderBy(...orderBy)
 		.limit(MAX_CANDIDATES);
+}
 
+export async function hasOAuthGrant(
+	providerId: string,
+	organizationId: string,
+	userId: string,
+	scope: string
+): Promise<boolean> {
+	const candidates = await listTokenCandidates(
+		providerId,
+		organizationId,
+		userId
+	);
+	return candidates.some((candidate) => hasScope(candidate.scope, scope));
+}
+
+async function resolveOAuthToken(
+	providerId: string,
+	organizationId: string,
+	userId?: string,
+	requiredScope?: string
+): Promise<ResolvedToken | null> {
+	const candidates = await listTokenCandidates(
+		providerId,
+		organizationId,
+		userId
+	);
 	for (const candidate of candidates) {
 		if (requiredScope && !hasScope(candidate.scope, requiredScope)) {
 			continue;
 		}
-		const resolved = await resolveCandidateToken(providerId, candidate);
+		const resolved = await resolveCandidateToken(candidate);
 		if (resolved) {
 			return resolved;
 		}
@@ -111,7 +131,7 @@ async function resolveOAuthToken(
 export function createCachedTokenFn(
 	providerId: string,
 	organizationId: string,
-	preferUserId?: string,
+	userId?: string,
 	requiredScope?: string
 ): () => Promise<string | null> {
 	let cached: string | null | undefined;
@@ -123,7 +143,7 @@ export function createCachedTokenFn(
 		const resolved = await resolveOAuthToken(
 			providerId,
 			organizationId,
-			preferUserId,
+			userId,
 			requiredScope
 		);
 		const now = Date.now();

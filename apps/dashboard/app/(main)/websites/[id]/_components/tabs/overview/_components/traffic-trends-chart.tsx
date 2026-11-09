@@ -4,6 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useAtom } from "jotai";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { AskAgentButton } from "@/components/agent/new-chat-button";
 import { AnnotationModal } from "@/components/charts/annotation-modal";
 import { AnnotationsPanel } from "@/components/charts/annotations-panel";
 import {
@@ -34,6 +35,7 @@ import {
 import { chartQueryOutcome } from "@/lib/chart-query-outcome";
 import { formatLocaleNumber } from "@/lib/format-locale-number";
 import { orpc } from "@/lib/orpc";
+import { getUserFacingErrorMessage } from "@/lib/user-facing-error";
 import { cn } from "@/lib/utils";
 import {
 	metricVisibilityAtom,
@@ -102,8 +104,7 @@ const CustomTooltip = ({
 
 	return (
 		<div className="min-w-[200px] rounded border bg-popover p-3 shadow-lg">
-			<div className="mb-2 flex items-center gap-2 border-b pb-2">
-				<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-chart-1" />
+			<div className="mb-2 border-b pb-2">
 				<p className="font-medium text-foreground text-xs">{label}</p>
 			</div>
 			<div className="space-y-1.5">
@@ -644,12 +645,15 @@ export function TrafficTrendsChart({
 
 	const createAnnotation = useMutation({
 		...orpc.annotations.create.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
 	});
 	const updateAnnotation = useMutation({
 		...orpc.annotations.update.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
 	});
 	const deleteAnnotation = useMutation({
 		...orpc.annotations.delete.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
 	});
 
 	const chartContext = useMemo((): ChartContext | null => {
@@ -704,7 +708,9 @@ export function TrafficTrendsChart({
 
 	const handleCreateAnnotation = async (annotation: CreateAnnotationInput) => {
 		if (!(websiteId && chartContext)) {
-			toast.error("Missing required data for annotation creation");
+			toast.error(
+				"Annotations need chart data. Pick a date range with traffic and try again."
+			);
 			return;
 		}
 
@@ -724,11 +730,14 @@ export function TrafficTrendsChart({
 		const promise = createAnnotation.mutateAsync(createData);
 
 		toast.promise(promise, {
-			error: (err) => err?.message || "Failed to create annotation",
-			loading: "Creating annotation...",
+			error: (error: unknown) => ({
+				message: "Failed to create annotation",
+				description: getUserFacingErrorMessage(error),
+			}),
+			loading: "Creating annotation…",
 			success: () => {
 				refetchAnnotations();
-				return "Annotation created successfully!";
+				return "Annotation created";
 			},
 		});
 
@@ -739,11 +748,14 @@ export function TrafficTrendsChart({
 		const promise = deleteAnnotation.mutateAsync({ id });
 
 		toast.promise(promise, {
-			error: (err) => err?.message || "Failed to delete annotation",
-			loading: "Deleting annotation...",
+			error: (error: unknown) => ({
+				message: "Failed to delete annotation",
+				description: getUserFacingErrorMessage(error),
+			}),
+			loading: "Deleting annotation…",
 			success: () => {
 				refetchAnnotations();
-				return "Annotation deleted successfully";
+				return "Annotation deleted";
 			},
 		});
 
@@ -757,11 +769,14 @@ export function TrafficTrendsChart({
 		const promise = updateAnnotation.mutateAsync({ id, ...updates });
 
 		toast.promise(promise, {
-			error: (err) => err?.message || "Failed to update annotation",
-			loading: "Updating annotation...",
+			error: (error: unknown) => ({
+				message: "Failed to update annotation",
+				description: getUserFacingErrorMessage(error),
+			}),
+			loading: "Updating annotation…",
 			success: () => {
 				refetchAnnotations();
-				return "Annotation updated successfully";
+				return "Annotation updated";
 			},
 		});
 
@@ -790,7 +805,7 @@ export function TrafficTrendsChart({
 								{granularity === "hourly" ? "Hourly" : "Daily"} traffic data
 							</p>
 							{dateRange.granularity === "hourly" && dateDiff > 7 ? (
-								<div className="mt-1 flex items-start gap-1 text-amber-600 text-xs">
+								<div className="mt-1 flex items-start gap-1 text-warning text-xs">
 									<WarningIcon className="mt-0.5 shrink-0" size={14} />
 									<span className="leading-relaxed">
 										Large date ranges may affect performance
@@ -800,50 +815,56 @@ export function TrafficTrendsChart({
 						</>
 					}
 					descriptionClassName="text-sidebar-foreground/70"
-					title="Traffic Trends"
+					title="Traffic trends"
 					titleClassName="font-semibold text-base text-sidebar-foreground sm:text-lg"
 				>
-					{annotations.length > 0 && (
-						<div className="flex items-center gap-0.5">
-							<Button
-								aria-label={
-									showAnnotations ? "Hide annotations" : "Show annotations"
-								}
-								className="size-7 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground"
-								onClick={() => setShowAnnotations(!showAnnotations)}
-								size="icon"
-								type="button"
-								variant="ghost"
-							>
-								{showAnnotations ? (
-									<EyeIcon className="size-3.5" />
-								) : (
-									<EyeSlashIcon className="size-3.5" />
-								)}
-							</Button>
-							<AnnotationsPanel
-								annotations={annotations}
-								granularity={granularity}
-								onDelete={handleDeleteAnnotation}
-								onEdit={setEditingAnnotation}
-								onOpenChange={setIsAnnotationsPanelOpen}
-								open={isAnnotationsPanelOpen}
-							/>
-						</div>
-					)}
+					<div className="flex items-center gap-0.5">
+						<AskAgentButton
+							className="text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+							subject="the traffic trends chart"
+						/>
+						{annotations.length > 0 && (
+							<>
+								<Button
+									aria-label={
+										showAnnotations ? "Hide annotations" : "Show annotations"
+									}
+									className="size-7 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+									onClick={() => setShowAnnotations(!showAnnotations)}
+									size="icon"
+									type="button"
+									variant="ghost"
+								>
+									{showAnnotations ? (
+										<EyeIcon className="size-3.5" />
+									) : (
+										<EyeSlashIcon className="size-3.5" />
+									)}
+								</Button>
+								<AnnotationsPanel
+									annotations={annotations}
+									granularity={granularity}
+									onDelete={handleDeleteAnnotation}
+									onEdit={setEditingAnnotation}
+									onOpenChange={setIsAnnotationsPanelOpen}
+									open={isAnnotationsPanelOpen}
+								/>
+							</>
+						)}
+					</div>
 				</Chart.Header>
 				<Chart.Content<ChartDataRow[]>
 					emptyProps={{
 						description:
 							"Your analytics data will appear here as visitors interact with your website",
 						icon: <ChartLineIcon className="size-12" />,
-						title: "No data available",
+						title: "No traffic data yet",
 					}}
 					errorProps={{
 						description:
 							"We couldn't load traffic data. Try again in a moment.",
 						icon: <WarningCircleIcon className="size-12" />,
-						title: "Something went wrong",
+						title: "Failed to load traffic data",
 						variant: "error",
 					}}
 					loading={

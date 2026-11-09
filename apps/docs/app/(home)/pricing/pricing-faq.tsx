@@ -22,12 +22,12 @@ export const pricingFaqItems = [
 	{
 		question: "Is there a free trial?",
 		answer:
-			"The Free plan has no trial period and requires no credit card. It includes 10,000 events per month and 10 AI credits for Databunny chat. Monthly investigations are available on the invite-only Business and Scale plans.",
+			"The Free plan has no trial period and requires no credit card. It includes 10,000 events per month and 10 AI credits for Databunny chat. Monthly investigations are included on the Business and Scale plans.",
 	},
 	{
 		question: "Can I switch plans?",
 		answer:
-			"Self-serve upgrades take effect immediately; downgrades start next billing cycle. Contact us for Business, Scale, or Enterprise access.",
+			"Upgrades take effect immediately; downgrades start next billing cycle. Contact us for Enterprise.",
 	},
 	{
 		question: "Do you offer annual billing?",
@@ -36,17 +36,17 @@ export const pricingFaqItems = [
 	{
 		question: "What counts as an event?",
 		answer:
-			"A page view, a custom event, an error, or a Web Vitals measurement each count as one event. Feature flag evaluations do not count toward your event quota.",
+			"A pageview, a custom event, a captured error, a Web Vitals measurement, or an MCP tool call each count as one event. Feature flag evaluations, uptime checks, and AI crawler visits do not count toward your event quota.",
 	},
 	{
 		question: "What payment methods do you accept?",
 		answer:
-			"We accept all major credit and debit cards via Stripe. All payments are processed securely - we never see or store your card details.",
+			"We accept all major credit and debit cards via Stripe. All payments are processed securely; we never see or store your card details.",
 	},
 	{
 		question: "Can I self-host instead?",
 		answer:
-			"Yes. Databuddy is fully open source. You can self-host the entire stack on your own infrastructure at no cost. The cloud plans are for teams who want a managed experience without the ops overhead.",
+			"The code is open source on GitHub, but a packaged self-host release is still pending. Until it ships, use the managed cloud, which is free up to 10,000 events a month.",
 	},
 ];
 

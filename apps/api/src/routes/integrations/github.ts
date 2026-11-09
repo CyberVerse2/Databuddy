@@ -5,6 +5,7 @@ import { githubIntegrations, member } from "@databuddy/db/schema";
 import { config } from "@databuddy/env/app";
 import { invalidateGithubIntegrationCache } from "@databuddy/redis/cache-invalidation";
 import { ratelimit } from "@databuddy/redis/rate-limit";
+import { recordSelfAnalyticsEvent } from "@databuddy/services/billing-lifecycle";
 import {
 	buildInstallUrl,
 	exchangeInstallUserCode,
@@ -256,11 +257,22 @@ async function handleInstallCallback(
 		if (!account) {
 			throw new GitHubInstallError(
 				"GitHub installation could not be verified",
-				"Could not verify GitHub installation"
+				"Failed to verify GitHub installation"
 			);
 		}
 
 		await saveGithubInstallation(state, account);
+		recordSelfAnalyticsEvent({
+			profileId: state.userId,
+			eventName: "integration_connected",
+			properties: { provider: "github" },
+			source: "integrations",
+		}).catch((error) => {
+			useLogger().warn("Integration event not recorded", {
+				integration: "github",
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
 
 		return integrationsRedirect("connected");
 	} catch (error) {
@@ -270,7 +282,7 @@ async function handleInstallCallback(
 		);
 		return integrationsRedirect(
 			"error",
-			publicInstallErrorMessage(error, "Could not finish GitHub install")
+			publicInstallErrorMessage(error, "Failed to finish GitHub install")
 		);
 	}
 }
@@ -306,7 +318,7 @@ export const githubIntegrationRoutes = new Elysia({
 				);
 				return integrationsRedirect(
 					"error",
-					publicInstallErrorMessage(error, "Could not start GitHub install")
+					publicInstallErrorMessage(error, "Failed to start GitHub install")
 				);
 			}
 		},

@@ -6,17 +6,32 @@ import {
 } from "../config/models";
 import { conversationModelOptions } from "../config/conversation-model";
 import { buildAnalyticsInstructions } from "../prompts/analytics";
-import { createToolkit } from "../tools/toolkit";
+import { getDataModelOutput, getDataTool } from "../tools/get-data";
+import { createToolkit, type ToolIntegrations } from "../tools/toolkit";
 import { stopAtMaxSteps } from "./stop-conditions";
 import type { AgentConfig, AgentContext } from "./types";
 
 export function createConfig(
-	context: AgentContext,
+	context: AgentContext & { integrations?: ToolIntegrations },
 	modelKey: AgentModelKey = "balanced",
 	modelOverride?: string | null
 ): AgentConfig {
 	const modelId = modelOverride ?? modelNames[modelKey];
 	const options = conversationModelOptions(modelId, context.thinking);
+
+	const tools = createToolkit({
+		capabilities: [
+			"analytics",
+			"investigation",
+			"mutations",
+			"memory",
+			"dashboard",
+		],
+		domain: context.websiteDomain,
+		integrations: context.integrations,
+		organizationId: context.organizationId,
+		userId: context.userId,
+	});
 
 	const appContext: AppContext = {
 		userId: context.userId,
@@ -24,6 +39,7 @@ export function createConfig(
 		websiteDomain: context.websiteDomain,
 		defaultWebsiteId: context.defaultWebsiteId ?? context.websiteId,
 		accessibleWebsites: context.accessibleWebsites,
+		latestUserMessage: context.latestUserMessage,
 		organizationId: context.organizationId,
 		source: "dashboard",
 		timezone: context.timezone,
@@ -40,18 +56,10 @@ export function createConfig(
 			content: buildAnalyticsInstructions(appContext),
 			providerOptions: options.systemProviderOptions,
 		},
-		tools: createToolkit({
-			capabilities: [
-				"analytics",
-				"investigation",
-				"mutations",
-				"memory",
-				"dashboard",
-			],
-			domain: context.websiteDomain,
-			organizationId: context.organizationId,
-			userId: context.userId,
-		}),
+		tools: {
+			...tools,
+			get_data: { ...getDataTool, toModelOutput: getDataModelOutput },
+		},
 		stopWhen: stopAtMaxSteps,
 		temperature: options.temperature,
 		providerOptions: options.providerOptions,

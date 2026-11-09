@@ -1,12 +1,14 @@
 "use client";
 
+import { useAuthCapabilities } from "../auth-capabilities";
 import { isSelfHosted } from "@databuddy/env/public";
 
 import { authClient } from "@databuddy/auth/client";
 import Link from "next/link";
-import { parseAsString, useQueryState } from "nuqs";
+import { useQueryState } from "nuqs";
 import { Suspense, useState } from "react";
 import { toast } from "sonner";
+import { showErrorToast } from "@/lib/user-facing-error";
 import { trackOpenAiRegistrationCompleted } from "@/components/openai-ads-pixel";
 import { GithubMark, GoogleMark } from "@/components/ui/brand-icons";
 import VisuallyHidden from "@/components/ui/visuallyhidden";
@@ -20,7 +22,7 @@ import {
 	type SignupMethod,
 	trackAppEvent,
 } from "@/lib/app-events";
-import { safeCallbackPath } from "@/lib/safe-callback";
+import { newUserCallbackPath, safeCallbackPath } from "@/lib/safe-callback";
 import {
 	CaretLeftIcon,
 	EyeIcon,
@@ -38,11 +40,10 @@ import {
 } from "@databuddy/ui";
 
 function RegisterPageContent() {
-	const [selectedPlan] = useQueryState("plan", parseAsString);
-	const [callback] = useQueryState(
-		"callback",
-		parseAsString.withDefault("/websites")
-	);
+	const capabilities = useAuthCapabilities();
+	const hasSocialLogin = capabilities.github || capabilities.google;
+	const [selectedPlan] = useQueryState("plan");
+	const [callback] = useQueryState("callback");
 	const safeCallback = safeCallbackPath(callback);
 	const [isLoading, setIsLoading] = useState(false);
 	const [formData, setFormData] = useState({
@@ -82,7 +83,6 @@ function RegisterPageContent() {
 
 	const getCallbackUrl = () => {
 		if (selectedPlan) {
-			localStorage.setItem("pendingPlanSelection", selectedPlan);
 			return `/billing/plans?plan=${selectedPlan}`;
 		}
 		return safeCallback;
@@ -95,12 +95,14 @@ function RegisterPageContent() {
 		e.preventDefault();
 
 		if (formData.password !== formData.confirmPassword) {
-			toast.error("Passwords do not match");
+			toast.error("The passwords do not match.");
 			return;
 		}
 
 		if (isHoneypot) {
-			toast.error("Server error, please try again later");
+			toast.error("Failed to create account", {
+				description: "Try again later.",
+			});
 			return;
 		}
 
@@ -114,16 +116,16 @@ function RegisterPageContent() {
 			email: formData.email,
 			password: formData.password,
 			name: formData.name,
-			callbackURL: getCallbackUrl(),
+			callbackURL: newUserCallbackPath(getCallbackUrl()),
 			fetchOptions: {
 				onSuccess: () => {
 					storeOnboardingAttribution(signupProperties);
 					trackSignup(APP_EVENTS.signupCompleted, signupProperties);
 					trackOpenAiRegistrationCompleted();
 					toast.success(
-						isSelfHosted
-							? "Account created. Check your inbox for any verification steps, then sign in."
-							: "Account created! Please check your email to verify your account."
+						capabilities.verifyEmail
+							? "Account created. Check your email to verify your account"
+							: "Account created. You can sign in now"
 					);
 					setRegistrationStep("verification-needed");
 				},
@@ -131,7 +133,10 @@ function RegisterPageContent() {
 		});
 
 		if (error) {
-			toast.error(error.message || "Failed to create account");
+			toast.error("Failed to create account", {
+				description:
+					"Check your details and try again. If you already have an account, sign in instead.",
+			});
 		}
 
 		setIsLoading(false);
@@ -146,16 +151,12 @@ function RegisterPageContent() {
 				callbackURL: getCallbackUrl(),
 			});
 			if (error) {
-				toast.error(
-					"We couldn't send the verification email. Try again in a moment."
-				);
+				showErrorToast(error, "Failed to send verification email");
 			} else {
-				toast.success("Verification email sent. Check your inbox.");
+				toast.success("Verification email sent. Check your inbox");
 			}
-		} catch {
-			toast.error(
-				"We couldn't send the verification email. Try again in a moment."
-			);
+		} catch (error) {
+			showErrorToast(error, "Failed to send verification email");
 		}
 		setIsLoading(false);
 	};
@@ -170,16 +171,14 @@ function RegisterPageContent() {
 			const result = await authClient.signIn.social({
 				provider,
 				callbackURL,
-				newUserCallbackURL:
-					callbackURL === "/websites" ? "/onboarding" : callbackURL,
+				newUserCallbackURL: newUserCallbackPath(callbackURL),
 				disableRedirect: true,
 			});
 
 			if (result.error) {
-				toast.error(
-					result.error.message ||
-						`${getProviderLabel(provider)} login failed. Please try again.`
-				);
+				toast.error(`Failed to sign in with ${getProviderLabel(provider)}`, {
+					description: "Try again in a moment.",
+				});
 				setIsLoading(false);
 				return;
 			}
@@ -190,12 +189,14 @@ function RegisterPageContent() {
 				return;
 			}
 
-			toast.error(
-				`${getProviderLabel(provider)} login failed. Please try again.`
-			);
+			toast.error(`Failed to sign in with ${getProviderLabel(provider)}`, {
+				description: "Try again in a moment.",
+			});
 			setIsLoading(false);
 		} catch {
-			toast.error("Login failed. Please try again.");
+			toast.error(`Failed to sign in with ${getProviderLabel(provider)}`, {
+				description: "Try again in a moment.",
+			});
 			setIsLoading(false);
 		}
 	};
@@ -206,18 +207,18 @@ function RegisterPageContent() {
 				return (
 					<>
 						<Text as="h1" className="text-balance font-medium text-2xl">
-							{isSelfHosted ? "Account created" : "Verify your email"}
+							{capabilities.verifyEmail
+								? "Verify your email"
+								: "Account created"}
 						</Text>
 						<Text tone="muted">
-							{isSelfHosted
-								? "If verification is required, check your email:"
-								: "Please check your email:"}{" "}
+							{capabilities.verifyEmail ? "Check your email:" : "Sign in with"}{" "}
 							<span className="font-medium text-accent-foreground">
 								{formData.email}
 							</span>{" "}
-							{isSelfHosted
-								? "and click the verification link. Otherwise, you can sign in now."
-								: "and click the verification link to activate your account. If you don't see the email, check your spam folder."}
+							{capabilities.verifyEmail
+								? "and click the verification link to activate your account. If you don't see the email, check your spam folder."
+								: "and your password."}
 						</Text>
 					</>
 				);
@@ -237,15 +238,17 @@ function RegisterPageContent() {
 
 	const renderVerificationContent = () => (
 		<div className="flex flex-col gap-3">
-			<Button
-				className="w-full"
-				loading={isLoading}
-				onClick={resendVerificationEmail}
-				size="lg"
-			>
-				<span className="hidden sm:inline">Resend verification email</span>
-				<span className="sm:hidden">Resend email</span>
-			</Button>
+			{capabilities.email && capabilities.verifyEmail && (
+				<Button
+					className="w-full"
+					loading={isLoading}
+					onClick={resendVerificationEmail}
+					size="lg"
+				>
+					<span className="hidden sm:inline">Resend verification email</span>
+					<span className="sm:hidden">Resend email</span>
+				</Button>
+			)}
 			<Button
 				onClick={() => setRegistrationStep("form")}
 				size="lg"
@@ -260,34 +263,45 @@ function RegisterPageContent() {
 
 	const renderFormContent = () => (
 		<div className="space-y-4">
-			<div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-				<Button
-					disabled={isLoading}
-					onClick={() => handleSocialLogin("github")}
-					size="lg"
-					variant="outline"
-				>
-					<GithubMark className="size-4" />
-					Sign up with GitHub
-				</Button>
-				<Button
-					disabled={isLoading}
-					onClick={() => handleSocialLogin("google")}
-					size="lg"
-					variant="outline"
-				>
-					<GoogleMark className="size-4" />
-					Sign up with Google
-				</Button>
-			</div>
+			{hasSocialLogin && (
+				<>
+					<div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+						{capabilities.github && (
+							<Button
+								disabled={isLoading}
+								onClick={() => handleSocialLogin("github")}
+								size="lg"
+								variant="outline"
+							>
+								<GithubMark className="size-4" />
+								Sign up with GitHub
+							</Button>
+						)}
+						{capabilities.google && (
+							<Button
+								disabled={isLoading}
+								onClick={() => handleSocialLogin("google")}
+								size="lg"
+								variant="outline"
+							>
+								<GoogleMark className="size-4" />
+								Sign up with Google
+							</Button>
+						)}
+					</div>
 
-			<div className="flex items-center gap-3">
-				<Divider className="flex-1 opacity-70" />
-				<Text className="text-nowrap text-muted-foreground/50" variant="label">
-					Or
-				</Text>
-				<Divider className="flex-1 opacity-70" />
-			</div>
+					<div className="flex items-center gap-3">
+						<Divider className="flex-1 opacity-70" />
+						<Text
+							className="text-nowrap text-muted-foreground/50"
+							variant="label"
+						>
+							Or
+						</Text>
+						<Divider className="flex-1 opacity-70" />
+					</div>
+				</>
+			)}
 
 			<form className="space-y-5" onSubmit={handleSubmit}>
 				<Field>

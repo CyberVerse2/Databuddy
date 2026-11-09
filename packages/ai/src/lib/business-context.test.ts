@@ -5,9 +5,11 @@ import {
 	businessContainerTag,
 	loadBusinessProfile,
 	mergeBusinessContext,
+	prioritizeBusinessContext,
 	recallBusinessContext,
 	recordBusinessReplies,
 	type BusinessSource,
+	type BusinessContext,
 } from "./business-context";
 
 const scope = {
@@ -85,7 +87,7 @@ describe("scoped business context through the native Supermemory transport", () 
 		});
 		expect(result.sources).toEqual([page]);
 		expect(result.issues).toContain(
-			"Website context is limited to the listed page excerpts."
+			"Only the homepage excerpt is available; read a page if a missing fact could change the decision."
 		);
 		expect(requests[0]?.containerTags).toEqual([businessContainerTag(scope)]);
 		expect(requests[0]?.includeContent).toBe(true);
@@ -123,8 +125,8 @@ describe("scoped business context through the native Supermemory transport", () 
 			query: "report_exported",
 		});
 		expect(result.sources).toEqual([]);
-		expect(result.status).toBe("partial");
-		expect(result.issues.length).toBeGreaterThan(0);
+		expect(result.issues).toEqual([]);
+		expect(result.telemetryIssues).toHaveLength(1);
 	});
 	it("recalls the full original text rather than an inferred provider summary or chunk", async () => {
 		const client = provider((path, body) => {
@@ -366,6 +368,30 @@ describe("scoped business context through the native Supermemory transport", () 
 		).toBeLessThanOrEqual(16_000);
 		expect(result.status).toBe("partial");
 	});
+	it("keeps shared-memory notes out of model-facing issues and status", () => {
+		const unconfigured = "Business memory is not configured.";
+		const unsaved =
+			"Website context is available for this run but was not saved to business memory.";
+		const result = mergeBusinessContext(
+			{
+				capturedAt: asOf.toISOString(),
+				status: "disabled",
+				issues: [],
+				sources: [],
+				telemetryIssues: [unconfigured],
+			},
+			{
+				capturedAt: asOf.toISOString(),
+				status: "ready",
+				issues: [],
+				sources: [page],
+				telemetryIssues: [unsaved],
+			}
+		);
+		expect(result.status).toBe("ready");
+		expect(result.issues).toEqual([]);
+		expect(result.telemetryIssues).toEqual([unconfigured, unsaved]);
+	});
 });
 
 afterAll(async () => {
@@ -373,4 +399,119 @@ afterAll(async () => {
 		const { shutdownPostgres } = await import("@databuddy/db");
 		await shutdownPostgres();
 	}
+});
+
+describe("optional business context ranking", () => {
+	const source = (id: string, size = 4000): BusinessSource => ({
+		...page,
+		id,
+		url: `https://reports.example.com/${id}`,
+		content: id.padEnd(size, "."),
+	});
+	const input: BusinessContext = {
+		capturedAt: asOf.toISOString(),
+		status: "ready",
+		issues: [],
+		sources: [
+			page,
+			reply,
+			source("a"),
+			source("b"),
+			source("c"),
+			source("decisive"),
+		],
+	};
+	it("recovers an omitted page without changing sources, pins, or native limits", async () => {
+		const before = structuredClone(input);
+		const baseline = mergeBusinessContext(input);
+		expect(baseline.sources.some((s) => s.id === "decisive")).toBe(false);
+		const ranked = await prioritizeBusinessContext(
+			[input],
+			async ({ pages }) =>
+				new Map(pages.map((s) => [s.id, s.id === "decisive" ? 1 : 0]))
+		);
+		expect(ranked.sources.some((s) => s.id === "decisive")).toBe(true);
+		expect(ranked.sources).toContain(page);
+		expect(ranked.sources).toContain(reply);
+		expect(ranked.sources.every((s) => input.sources.includes(s))).toBe(true);
+		expect(
+			ranked.sources.reduce((n, s) => n + s.content.length, 0)
+		).toBeLessThanOrEqual(16_000);
+		expect(input).toEqual(before);
+	});
+	it("does not call ranking when native context fits", async () => {
+		const small = { ...input, sources: input.sources.slice(0, 3) };
+		const actual = await prioritizeBusinessContext([small], () => {
+			throw new Error("Unnecessary ranking");
+		});
+		expect(actual).toEqual(mergeBusinessContext(small));
+	});
+	it("keeps the exact native order for ties or invalid scores", async () => {
+		for (const invalid of [
+			null,
+			new Map<string, number>(),
+			new Map([["a", Number.NaN]]),
+		]) {
+			expect(
+				await prioritizeBusinessContext([input], async () => invalid)
+			).toEqual(mergeBusinessContext(input));
+		}
+		expect(
+			await prioritizeBusinessContext(
+				[input],
+				async ({ pages }) => new Map(pages.map((s) => [s.id, 0.5]))
+			)
+		).toEqual(mergeBusinessContext(input));
+	});
+	it("keeps the original fallback homepage and later duplicate content", async () => {
+		const first = source("first");
+		const newer = {
+			...source("decisive"),
+			content: "Canonical newer page".padEnd(4000, "."),
+		};
+		const contexts: BusinessContext[] = [
+			{ ...input, sources: [source("decisive")] },
+			{
+				...input,
+				sources: [first, source("a"), source("b"), source("c"), newer],
+			},
+		];
+		const ranked = await prioritizeBusinessContext(
+			contexts,
+			async ({ pages }) => {
+				expect(pages).not.toContain(first);
+				return new Map(pages.map((s) => [s.id, s.id === "decisive" ? 1 : 0]));
+			}
+		);
+		expect(ranked.sources[0]).toBe(first);
+		expect(ranked.sources).toContain(newer);
+	});
+	it("falls back when larger ranked pages would displace a protected reply", async () => {
+		const lateReply = { ...reply, content: "Correction".padEnd(4000, ".") };
+		const crowded = {
+			...input,
+			sources: [
+				source("home"),
+				source("small", 1000),
+				source("medium", 2000),
+				source("tiny", 1000),
+				lateReply,
+				source("large"),
+				source("last"),
+				source("extra"),
+			],
+		};
+		const result = await prioritizeBusinessContext(
+			[crowded],
+			async ({ pages }) =>
+				new Map(
+					pages.map((s) => [
+						s.id,
+						["large", "last", "extra"].includes(s.id) ? 1 : 0,
+					])
+				)
+		);
+		expect(result.sources).toContain(lateReply);
+		expect(result).toEqual(mergeBusinessContext(crowded));
+	});
 });

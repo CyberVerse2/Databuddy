@@ -1,149 +1,153 @@
 import {
-	API_KEY_AUTH_CHALLENGE,
 	getAccessibleWebsiteIds,
 	hasKeyAllScopes,
 	hasWebsiteAllScopes,
 } from "@databuddy/api-keys/resolve";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { config } from "@databuddy/env/app";
+import { readBooleanEnv } from "@databuddy/env/boolean";
+import { trackMcp } from "@databuddy/sdk/mcp";
+import { resolveDeployCommit } from "@databuddy/shared/evlog-redaction";
+import {
+	bearerAuthChallengeResponse,
+	createMcpHandler,
+	McpServer,
+	OAuthError,
+	OAuthErrorCode,
+	ProtocolError,
+	ProtocolErrorCode,
+	type Tool,
+} from "@modelcontextprotocol/server";
+import { z } from "zod";
 import { captureError, mergeWideEvent } from "../lib/tracing";
-import type {
-	McpRequestContext,
-	McpToolMetadata,
-	RegisteredMcpTool,
+import {
+	authType,
+	type McpRequestContext,
+	type RegisteredMcpTool,
 } from "../ai/mcp/define-tool";
 import { createMcpTools } from "../ai/mcp/tools";
 import { GUIDE_MARKDOWN, GUIDE_URI, MCP_INSTRUCTIONS } from "./guide";
 
+export { flushMcp } from "@databuddy/sdk/mcp";
+
 export interface DatabuddyMcpHttpOptions extends McpRequestContext {
+	clientName?: string;
 	request: Request;
+}
+
+const RESOURCE_METADATA_URL = new URL(
+	"/.well-known/oauth-protected-resource",
+	config.urls.mcp
+).href;
+const MAX_MCP_REQUEST_BYTES = 1_048_576;
+
+export function createMcpErrorResponse(
+	status: number,
+	code: number,
+	message: string,
+	headers?: HeadersInit
+): Response {
+	return Response.json(
+		{ jsonrpc: "2.0", error: { code, message }, id: null },
+		{ status, headers }
+	);
 }
 
 export function createMcpUnauthorizedResponse(): Response {
 	mergeWideEvent({ mcp_auth: "unauthorized" });
 
-	return Response.json(
-		{
-			jsonrpc: "2.0",
-			error: {
-				code: -32_001,
-				message:
-					"Authentication required. Use x-api-key or Authorization: Bearer with a valid Databuddy API key.",
-			},
-			id: null,
-		},
-		{
-			status: 401,
-			headers: {
-				"WWW-Authenticate": API_KEY_AUTH_CHALLENGE,
-			},
-		}
+	return bearerAuthChallengeResponse(
+		new OAuthError(
+			OAuthErrorCode.InvalidToken,
+			"Authentication required. Use OAuth 2.1, or x-api-key / Authorization: Bearer with a valid Databuddy API key."
+		),
+		{ resourceMetadataUrl: RESOURCE_METADATA_URL }
 	);
 }
 
-export async function handleDatabuddyMcpRequest(
+export function handleDatabuddyMcpRequest(
 	options: DatabuddyMcpHttpOptions
 ): Promise<Response> {
-	if (options.request.method !== "POST") {
-		return new Response(null, { status: 405, headers: { Allow: "POST" } });
-	}
-
 	mergeWideEvent({
-		mcp_auth: options.userId ? "session" : "api_key",
-		mcp_session: Boolean(options.userId),
+		mcp_auth: authType(options),
+		mcp_session: Boolean(options.userId && !options.oauth),
 		mcp_api_key: Boolean(options.apiKey),
 	});
+	const handler = createMcpHandler(() => createMcpServer(options), {
+		maxRequestBodySize: MAX_MCP_REQUEST_BYTES,
+		onerror: (error) => mergeWideEvent({ mcp_transport_error: error.message }),
+	});
+	return handler.fetch(options.request).catch((error) => {
+		captureError(error, { mcp_error: true });
+		throw error;
+	});
+}
 
+function createMcpServer(options: DatabuddyMcpHttpOptions): McpServer {
 	const server = new McpServer(
 		{
 			name: "databuddy",
-			version: "1.0.0",
+			version: resolveDeployCommit()?.slice(0, 7) ?? "1.0.0",
 		},
-		{
-			instructions: MCP_INSTRUCTIONS,
-		}
+		{ capabilities: { tools: {} }, instructions: MCP_INSTRUCTIONS }
 	);
 
+	if (!readBooleanEnv("SELFHOST")) {
+		trackMcp(server, {
+			beforeSend: (call) => ({
+				...call,
+				clientName: call.clientName ?? options.clientName,
+			}),
+		});
+	}
 	registerGuideResource(server);
 
-	for (const tool of createMcpTools(options)) {
-		if (!apiKeyCanCallTool(options.apiKey, tool)) {
-			continue;
+	const allTools = createMcpTools(options);
+	const tools = allTools.filter((tool) => callerCanCallTool(options, tool));
+	server.server.setRequestHandler("tools/list", () => ({
+		tools: tools.map(toListedTool),
+	}));
+	server.server.setRequestHandler("tools/call", ({ params }, ctx) => {
+		const tool = tools.find(({ name }) => name === params.name);
+		if (tool) {
+			return tool.handler(params.arguments, { signal: ctx.mcpReq.signal });
 		}
-		server.registerTool(
-			tool.name,
-			{
-				title: titleFromName(tool.name),
-				description: tool.description,
-				inputSchema: toMcpSchema(tool.inputSchema),
-				...(tool.outputSchema && {
-					outputSchema: toMcpSchema(tool.outputSchema),
-				}),
-				annotations: deriveAnnotations(tool.metadata),
-			},
-			tool.handler
+		const hidden = allTools.find(({ name }) => name === params.name);
+		throw new ProtocolError(
+			ProtocolErrorCode.InvalidParams,
+			hidden
+				? `Tool ${params.name} requires scopes: ${hidden.metadata.access.scopes.join(", ")}. Reconnect or use an API key that has them.`
+				: `Unknown tool: ${params.name}`
 		);
-	}
-
-	const transport = new WebStandardStreamableHTTPServerTransport({
-		sessionIdGenerator: undefined,
-		enableJsonResponse: true,
 	});
-
-	try {
-		await server.connect(transport);
-		return await transport.handleRequest(options.request);
-	} catch (error) {
-		captureError(error, { mcp_error: true });
-		throw error;
-	} finally {
-		await server.close().catch(() => {});
-	}
+	return server;
 }
 
-function apiKeyCanCallTool(
-	apiKey: McpRequestContext["apiKey"],
+function callerCanCallTool(
+	{ apiKey, oauth }: McpRequestContext,
 	tool: RegisteredMcpTool
 ): boolean {
-	const required = tool.metadata.access.scopes;
-	if (!required?.length) {
+	const { scopes: required, globalScopes } = tool.metadata.access;
+	if (!required.length) {
 		return true;
+	}
+	if (oauth) {
+		return required.every((scope) => oauth.scopes.includes(scope));
 	}
 	if (!apiKey) {
-		// Session-authenticated callers fall through to downstream role checks.
 		return true;
 	}
-	const globalScopes = tool.metadata.access.globalScopes;
-	if (globalScopes.length && !hasKeyAllScopes(apiKey, globalScopes)) {
+	if (!hasKeyAllScopes(apiKey, globalScopes)) {
 		return false;
 	}
 	const websiteScopes = required.filter(
 		(scope) => !globalScopes.includes(scope)
 	);
-	if (!websiteScopes.length || hasKeyAllScopes(apiKey, websiteScopes)) {
-		return true;
-	}
-	return getAccessibleWebsiteIds(apiKey).some((websiteId) =>
-		hasWebsiteAllScopes(apiKey, websiteId, websiteScopes)
+	return (
+		hasKeyAllScopes(apiKey, websiteScopes) ||
+		getAccessibleWebsiteIds(apiKey).some((websiteId) =>
+			hasWebsiteAllScopes(apiKey, websiteId, websiteScopes)
+		)
 	);
-}
-
-function titleFromName(name: string): string {
-	// MCP tool names are validated against /^[a-z][a-z0-9_]*$/ in defineMcpTool,
-	// so split always returns at least one non-empty leading-alpha word.
-	const [head = name, ...rest] = name.split("_");
-	return [head.charAt(0).toUpperCase() + head.slice(1), ...rest].join(" ");
-}
-
-function deriveAnnotations(metadata: McpToolMetadata): ToolAnnotations {
-	const isRead = metadata.access.kind === "read";
-	return {
-		readOnlyHint: isRead,
-		destructiveHint: !isRead,
-		idempotentHint: isRead,
-	};
 }
 
 function registerGuideResource(server: McpServer): void {
@@ -153,7 +157,7 @@ function registerGuideResource(server: McpServer): void {
 		{
 			title: "Databuddy MCP guide",
 			description:
-				"Workflow tips, query conventions, and known footguns. Read after the session-start instructions when you want more depth.",
+				"Reference for Databuddy MCP tools: query conventions, what insight and investigation fields mean, and the scopes each tool needs.",
 			mimeType: "text/markdown",
 		},
 		(uri) => ({
@@ -168,7 +172,22 @@ function registerGuideResource(server: McpServer): void {
 	);
 }
 
-function toMcpSchema(schema: RegisteredMcpTool["inputSchema"]): AnySchema {
-	// The MCP SDK's zod-compat type targets a different Zod surface than this repo's Zod v4 types.
-	return schema as unknown as AnySchema;
+function toListedTool(tool: RegisteredMcpTool): Tool {
+	return {
+		name: tool.name,
+		title: tool.title,
+		description: tool.description,
+		inputSchema: z.toJSONSchema(tool.inputSchema, {
+			io: "input",
+			target: "draft-7",
+		}) as Tool["inputSchema"],
+		...(tool.outputSchema && {
+			outputSchema: z.toJSONSchema(tool.outputSchema, {
+				io: "output",
+				metadata: z.registry(),
+				target: "draft-7",
+			}) as Tool["outputSchema"],
+		}),
+		annotations: tool.annotations,
+	};
 }

@@ -1,7 +1,11 @@
 export const APP_EVENTS = {
+	checkoutCompleted: "checkout_completed",
+	feedbackCreditsRedeemed: "feedback_credits_redeemed",
 	firstReviewCompleted: "first_review_completed",
 	firstReviewStarted: "first_review_started",
 	firstReviewViewed: "first_review_viewed",
+	invitationAccepted: "invitation_accepted",
+	mcpSetupCopied: "mcp_setup_copied",
 	onboardingCompleted: "onboarding_completed",
 	onboardingInviteSent: "onboarding_invite_sent",
 	onboardingSkipped: "onboarding_skipped",
@@ -14,6 +18,11 @@ export const APP_EVENTS = {
 	onboardingWebsiteCreated: "onboarding_website_created",
 	signupCompleted: "signup_completed",
 	signupStarted: "signup_started",
+	topupPurchaseStarted: "topup_purchase_started",
+	twoFactorDisabled: "two_factor_disabled",
+	twoFactorEnabled: "two_factor_enabled",
+	websiteCreated: "website_created",
+	websiteTransferred: "website_transferred",
 } as const;
 
 export const UTM_PARAM_KEYS = [
@@ -45,7 +54,9 @@ export const SIGNUP_METHODS = [
 export type AppEventName = (typeof APP_EVENTS)[keyof typeof APP_EVENTS];
 export type EmptyAppEventName =
 	| typeof APP_EVENTS.onboardingTrackingCheckStatus
-	| typeof APP_EVENTS.onboardingTrackingVerified;
+	| typeof APP_EVENTS.onboardingTrackingVerified
+	| typeof APP_EVENTS.twoFactorDisabled
+	| typeof APP_EVENTS.twoFactorEnabled;
 export type AppEventNameWithProperties = Exclude<
 	AppEventName,
 	EmptyAppEventName
@@ -55,7 +66,25 @@ export type UtmProperties = Partial<Record<UtmParamKey, string>>;
 export type MarketingParamKey = (typeof MARKETING_PARAM_KEYS)[number];
 export type MarketingProperties = Partial<Record<MarketingParamKey, string>>;
 export type SignupMethod = (typeof SIGNUP_METHODS)[number];
-export type OnboardingStepId = "website" | "tracking" | "team" | "explore";
+export type OnboardingStepId =
+	| "wants"
+	| "website"
+	| "tracking"
+	| "billing"
+	| "finish";
+export type OnboardingIntent =
+	| "traffic"
+	| "conversions"
+	| "performance"
+	| "ai_visibility";
+export type OnboardingWant =
+	| "analytics"
+	| "conversions"
+	| "performance"
+	| "ai_visibility"
+	| "uptime"
+	| "links"
+	| "mcp";
 
 type EmptyProperties = Record<never, never>;
 
@@ -69,6 +98,13 @@ export interface OnboardingAttributionProperties extends MarketingProperties {
 }
 
 export interface AppEventProperties {
+	[APP_EVENTS.checkoutCompleted]: {
+		source: "stripe";
+	};
+	[APP_EVENTS.feedbackCreditsRedeemed]: {
+		reward: "agent_credits" | "events";
+		tier: number;
+	};
 	[APP_EVENTS.firstReviewCompleted]: {
 		published_insights: number;
 		website_id: string;
@@ -78,6 +114,9 @@ export interface AppEventProperties {
 	};
 	[APP_EVENTS.firstReviewViewed]: {
 		website_id: string;
+	};
+	[APP_EVENTS.invitationAccepted]: {
+		role: string;
 	};
 	[APP_EVENTS.onboardingCompleted]: OnboardingAttributionProperties;
 	[APP_EVENTS.onboardingInviteSent]: {
@@ -92,6 +131,13 @@ export interface AppEventProperties {
 	[APP_EVENTS.onboardingStepCompleted]: {
 		step: OnboardingStepId;
 		verified?: boolean;
+		origin?: "ai" | "manual";
+		intent?: OnboardingIntent;
+		wants?: string;
+	};
+	[APP_EVENTS.mcpSetupCopied]: {
+		block: string;
+		method: "ai" | "manual";
 	};
 	[APP_EVENTS.onboardingStepViewed]: {
 		step: OnboardingStepId;
@@ -106,6 +152,18 @@ export interface AppEventProperties {
 	[APP_EVENTS.onboardingWebsiteCreated]: OnboardingAttributionProperties;
 	[APP_EVENTS.signupCompleted]: SignupEventProperties;
 	[APP_EVENTS.signupStarted]: SignupEventProperties;
+	[APP_EVENTS.topupPurchaseStarted]: {
+		feature: "agent_credits" | "investigation_runs";
+		quantity: number;
+	};
+	[APP_EVENTS.twoFactorDisabled]: EmptyProperties;
+	[APP_EVENTS.twoFactorEnabled]: EmptyProperties;
+	[APP_EVENTS.websiteCreated]: {
+		source: "dialog";
+	};
+	[APP_EVENTS.websiteTransferred]: {
+		target: "organization" | "personal";
+	};
 }
 
 function readParamProperties<const Key extends string>(

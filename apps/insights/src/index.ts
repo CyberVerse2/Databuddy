@@ -28,6 +28,7 @@ import {
 	insightsLoggerDrain,
 } from "./lib/evlog-insights";
 import {
+	ensureAiDigestSchedule,
 	ensureInsightsDispatchSchedule,
 	ensureInsightsMaintenanceSchedule,
 } from "./scheduler";
@@ -107,26 +108,18 @@ function exitAfterDrain(code: number) {
 		return;
 	}
 	shuttingDown = true;
-	drainAll()
-		.catch((error) => {
-			captureInsightsError(error, "lifecycle.shutdown_failed", {
-				lifecycle: "shutdown",
-			});
-		})
-		.finally(() => process.exit(code));
+	drainAll().finally(() => process.exit(code));
 }
 
-async function shutdown(signal: string) {
+function shutdown(signal: string) {
 	if (shuttingDown) {
 		return;
 	}
-	shuttingDown = true;
 	emitInsightsEvent("info", "lifecycle.shutdown_requested", {
 		lifecycle: "shutdown",
 		signal,
 	});
-	await drainAll();
-	process.exit(0);
+	exitAfterDrain(0);
 }
 
 async function startRuntime() {
@@ -176,6 +169,7 @@ async function startRuntime() {
 			});
 		});
 		await Promise.all([
+			ensureAiDigestSchedule(),
 			ensureInsightsDispatchSchedule(),
 			ensureInsightsMaintenanceSchedule(),
 		]);

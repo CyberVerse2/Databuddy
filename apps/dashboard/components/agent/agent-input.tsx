@@ -84,6 +84,16 @@ export function AgentInput() {
 		inputSyncRef.current = input;
 	}, [input]);
 
+	useEffect(() => {
+		const ta = textareaRef.current;
+		const draftLength = inputSyncRef.current.length;
+		if (!ta || draftLength === 0) {
+			return;
+		}
+		ta.focus();
+		ta.setSelectionRange(draftLength, draftLength);
+	}, []);
+
 	const cancelPlaceholderReplay = useCallback(() => {
 		if (replayFrameRef.current === null) {
 			return;
@@ -681,7 +691,7 @@ function GeneratingHint() {
 	return (
 		<div className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
 			<CircleNotchIcon className="size-3.5 animate-spin text-primary" />
-			<span>Generating...</span>
+			<span>Generating…</span>
 		</div>
 	);
 }

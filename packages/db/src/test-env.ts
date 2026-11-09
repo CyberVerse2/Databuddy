@@ -1,17 +1,14 @@
-import { readBooleanEnv } from "@databuddy/env/app";
+import { isLoopbackHost, readBooleanEnv } from "@databuddy/env/app";
 
 const useCiUrls = readBooleanEnv("CI");
 const defaultDatabaseUrl =
 	"postgres://databuddy:databuddy_dev_password@localhost:5432/databuddy_test";
 const defaultRedisUrl = "redis://localhost:6379/1";
 
-const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
-
 function localTestUrl(name: string, value: string): string {
-	const { hostname } = new URL(value);
-	if (!loopbackHosts.has(hostname)) {
+	if (!isLoopbackHost(value)) {
 		throw new Error(
-			`${name} must point at a local test service. Refusing to run tests against ${hostname}.`
+			`${name} must point at a local test service. Refusing to run tests against ${new URL(value).hostname}.`
 		);
 	}
 	return value;
@@ -29,6 +26,11 @@ process.env.BULLMQ_REDIS_URL =
 	useCiUrls && process.env.BULLMQ_REDIS_URL
 		? localTestUrl("BULLMQ_REDIS_URL", process.env.BULLMQ_REDIS_URL)
 		: process.env.REDIS_URL;
+process.env.CLICKHOUSE_URL =
+	useCiUrls && process.env.CLICKHOUSE_URL
+		? localTestUrl("CLICKHOUSE_URL", process.env.CLICKHOUSE_URL)
+		: "http://default:@localhost:8123";
 process.env.BETTER_AUTH_SECRET ??= "test-auth-secret-for-integration";
 process.env.BETTER_AUTH_URL ??= "http://localhost:3001";
+process.env.AUTUMN_SECRET_KEY ||= "test-autumn-secret-key";
 process.env.NODE_ENV = "test";

@@ -2,19 +2,6 @@ import { Analytics } from "../../types/tables";
 import { Expressions } from "../expressions";
 import type { SimpleQueryConfig } from "../types";
 
-const UTM_BASE_FILTERS = [
-	"path",
-	"query_string",
-	"country",
-	"device_type",
-	"browser_name",
-	"os_name",
-	"referrer",
-	"utm_source",
-	"utm_medium",
-	"utm_campaign",
-];
-
 function utmDimension(options: {
 	column: string;
 	title: string;
@@ -53,12 +40,11 @@ function utmDimension(options: {
 					name: "percentage",
 					type: "number",
 					label: "Traffic %",
-					description: "Percentage of total UTM traffic",
+					description: `Share of summed visitor counts across all UTM ${noun} groups`,
 					unit: "%",
 				},
 			],
 			default_visualization: "table",
-			supports_granularity: ["hour", "day"],
 		},
 		table: Analytics.events,
 		fields: [
@@ -72,15 +58,13 @@ function utmDimension(options: {
 		orderBy: "visitors DESC",
 		limit: 100,
 		timeField: "time",
-		allowedFilters: UTM_BASE_FILTERS.includes(column)
-			? UTM_BASE_FILTERS
-			: [...UTM_BASE_FILTERS, column],
+		allowedFilters: [column],
 		customizable: true,
 		plugins: { sessionAttribution: true },
 	};
 }
 
-export const TrafficBuilders: Record<string, SimpleQueryConfig> = {
+export const TrafficBuilders = {
 	// SQL output only; parseReferrers plugin adds referrer/source/domain/referrer_type/parsed_referrer at runtime.
 	top_referrers: {
 		meta: {
@@ -118,7 +102,6 @@ export const TrafficBuilders: Record<string, SimpleQueryConfig> = {
 				},
 			],
 			default_visualization: "table",
-			supports_granularity: ["hour", "day"],
 		},
 		table: Analytics.events,
 		fields: [
@@ -139,18 +122,6 @@ export const TrafficBuilders: Record<string, SimpleQueryConfig> = {
 		orderBy: "visitors DESC",
 		limit: 100,
 		timeField: "time",
-		allowedFilters: [
-			"path",
-			"query_string",
-			"country",
-			"device_type",
-			"browser_name",
-			"os_name",
-			"referrer",
-			"utm_source",
-			"utm_medium",
-			"utm_campaign",
-		],
 		customizable: true,
 		plugins: {
 			deduplicateReferrers: true,
@@ -246,7 +217,6 @@ export const TrafficBuilders: Record<string, SimpleQueryConfig> = {
 				},
 			],
 			default_visualization: "table",
-			supports_granularity: ["hour", "day"],
 		},
 		table: Analytics.events,
 		fields: [
@@ -260,18 +230,6 @@ export const TrafficBuilders: Record<string, SimpleQueryConfig> = {
 		orderBy: "visitors DESC",
 		limit: 100,
 		timeField: "time",
-		allowedFilters: [
-			"path",
-			"query_string",
-			"country",
-			"device_type",
-			"browser_name",
-			"os_name",
-			"referrer",
-			"utm_source",
-			"utm_medium",
-			"utm_campaign",
-		],
 		customizable: true,
 		plugins: {
 			deduplicateReferrers: true,
@@ -279,4 +237,4 @@ export const TrafficBuilders: Record<string, SimpleQueryConfig> = {
 			sessionAttribution: true,
 		},
 	},
-};
+} satisfies Record<string, SimpleQueryConfig>;

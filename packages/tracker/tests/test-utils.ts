@@ -10,6 +10,7 @@ const BASKET_ROUTES = new Set([
 	"POST /batch",
 	"POST /vitals",
 	"POST /errors",
+	"POST /engagement",
 	"POST /events",
 	"POST /identify",
 	"POST /track",
@@ -91,6 +92,21 @@ export const test = base.extend<{ basketGuard: undefined }>({
 		{ auto: true },
 	],
 });
+
+export async function emulateIosPageLifecycle(page: Page): Promise<void> {
+	await page.addInitScript(() => {
+		const addEventListener = window.addEventListener.bind(window);
+		window.addEventListener = ((
+			type: string,
+			listener: EventListenerOrEventListenerObject,
+			options?: boolean | AddEventListenerOptions
+		) => {
+			if (type !== "beforeunload") {
+				addEventListener(type, listener, options);
+			}
+		}) as typeof window.addEventListener;
+	});
+}
 
 export async function waitForDebugScrollHook(page: Page): Promise<void> {
 	await expect

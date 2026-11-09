@@ -15,6 +15,7 @@ const TABLE_NAME_PATTERN =
 
 export interface ParsedColumn {
 	computed: boolean;
+	definition: string;
 	hasDefault: boolean;
 	name: string;
 	nullable: boolean;
@@ -41,6 +42,7 @@ export interface ParsedTable {
 	partitionBy: string;
 	primaryKey: string;
 	settings: string;
+	ttl: string;
 }
 
 export function sqlFiles(dir: string, includeViews = true): string[] {
@@ -104,11 +106,11 @@ const COLUMN_MODIFIERS =
 const NON_COLUMN = /^(?:INDEX|CONSTRAINT|PROJECTION|PRIMARY\s+KEY)\b/i;
 
 export function tableNameOf(sql: string): string {
-	const m = sql.match(TABLE_NAME_PATTERN);
-	if (!m) {
+	const name = sql.match(TABLE_NAME_PATTERN)?.[1];
+	if (name === undefined) {
 		throw new Error("Could not parse table name");
 	}
-	return m[1];
+	return name;
 }
 
 export function qualifiedNameOf(sql: string): string {
@@ -128,18 +130,20 @@ export function parseColumns(sql: string): ParsedColumn[] {
 			continue;
 		}
 		const nameMatch = item.match(COLUMN_NAME_PATTERN);
-		if (!nameMatch) {
+		const name = nameMatch?.[1];
+		if (!nameMatch || name === undefined) {
 			continue;
 		}
 		const afterName = item.slice(nameMatch[0].length);
 		const modAt = afterName.search(COLUMN_MODIFIERS);
 		const type = (modAt === -1 ? afterName : afterName.slice(0, modAt)).trim();
 		cols.push({
-			name: nameMatch[1],
+			name,
 			type,
 			nullable: isNullable(type),
 			hasDefault: DEFAULT_PATTERN.test(afterName),
 			computed: COMPUTED_PATTERN.test(afterName),
+			definition: item,
 		});
 	}
 	return cols;
@@ -153,22 +157,66 @@ function parseIndexes(sql: string): ParsedIndex[] {
 	const indexes: ParsedIndex[] = [];
 	for (const item of splitTopLevel(firstParenGroup(sql).body)) {
 		const match = item.match(INDEX_NAME_PATTERN);
-		if (!match) {
+		const name = match?.[1];
+		if (!match || name === undefined) {
 			continue;
 		}
 		indexes.push({
-			name: match[1],
+			name,
 			definition: normalizeDefinition(item.slice(match[0].length)),
 		});
 	}
 	return indexes;
 }
 
-function clause(tail: string, keyword: string, stops: string[]): string {
-	const lookahead = stops.length ? `(?=(?:${stops.join("|")})\\b|$)` : "(?=$)";
-	const re = new RegExp(`${keyword}\\s+([\\s\\S]*?)\\s*${lookahead}`, "i");
-	const m = tail.match(re);
-	return m ? m[1].trim() : "";
+const QUOTED_PATTERN = /'(?:[^'\\]|\\.|'')*'|`[^`]*`/g;
+
+// ClickHouse stores `INTERVAL 90 DAYS` and `INTERVAL '90 day'` as
+// `toIntervalDay(90)`, keeps a quoted amount quoted, and drops the default
+// DELETE action.
+const TTL_CANONICAL_PATTERN = new RegExp(
+	`(${QUOTED_PATTERN.source})|\\bINTERVAL\\s+(?:'(\\d+)\\s+([a-z]+?)s?'|('\\d+'|\\d+)\\s+([a-z]+?)s?\\b)|\\s+DELETE(?=\\s+WHERE\\s|\\s*,|$)`,
+	"gi"
+);
+
+function canonicalTtl(ttl: string): string {
+	return ttl.replace(
+		TTL_CANONICAL_PATTERN,
+		(
+			_match: string,
+			quoted: string | undefined,
+			spanAmount: string | undefined,
+			spanUnit: string | undefined,
+			amount: string | undefined,
+			unit: string | undefined
+		) => {
+			if (quoted !== undefined) {
+				return quoted;
+			}
+			const intervalUnit = spanUnit ?? unit;
+			if (intervalUnit === undefined) {
+				return "";
+			}
+			return `toInterval${intervalUnit[0]?.toUpperCase()}${intervalUnit.slice(1).toLowerCase()}(${spanAmount ?? amount})`;
+		}
+	);
+}
+
+function clause(
+	tail: string,
+	masked: string,
+	keyword: string,
+	stops: string[]
+): string {
+	const start = new RegExp(`(?:^|\\s)${keyword}\\s`, "i").exec(masked);
+	if (!start) {
+		return "";
+	}
+	const from = start.index + start[0].length;
+	const end = stops.length
+		? masked.slice(from).search(new RegExp(`\\s(?:${stops.join("|")})\\s`, "i"))
+		: -1;
+	return tail.slice(from, end === -1 ? undefined : from + end).trim();
 }
 
 export function parseTable(sql: string): ParsedTable {
@@ -180,12 +228,15 @@ export function parseTable(sql: string): ParsedTable {
 		.slice(firstParenGroup(sql).end + 1)
 		.replace(/\s+/g, " ")
 		.trim();
+	const masked = tail.replace(QUOTED_PATTERN, (quoted) =>
+		"_".repeat(quoted.length)
+	);
 	return {
 		name,
 		isView,
 		columns,
 		indexes,
-		engine: clause(tail, "ENGINE\\s*=", [
+		engine: clause(tail, masked, "ENGINE\\s*=", [
 			"PARTITION BY",
 			"PRIMARY KEY",
 			"ORDER BY",
@@ -193,26 +244,27 @@ export function parseTable(sql: string): ParsedTable {
 			"TTL",
 			"SETTINGS",
 		]),
-		partitionBy: clause(tail, "PARTITION BY", [
+		partitionBy: clause(tail, masked, "PARTITION BY", [
 			"PRIMARY KEY",
 			"ORDER BY",
 			"SAMPLE BY",
 			"TTL",
 			"SETTINGS",
 		]),
-		primaryKey: clause(tail, "PRIMARY KEY", [
+		primaryKey: clause(tail, masked, "PRIMARY KEY", [
 			"ORDER BY",
 			"SAMPLE BY",
 			"TTL",
 			"SETTINGS",
 		]),
-		orderBy: clause(tail, "ORDER BY", [
+		orderBy: clause(tail, masked, "ORDER BY", [
 			"PRIMARY KEY",
 			"SAMPLE BY",
 			"TTL",
 			"SETTINGS",
 		]),
-		settings: clause(tail, "SETTINGS", []),
+		settings: clause(tail, masked, "SETTINGS", []),
+		ttl: canonicalTtl(clause(tail, masked, "TTL", ["SETTINGS"])),
 	};
 }
 

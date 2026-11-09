@@ -1,12 +1,16 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { toast } from "sonner";
+import { showErrorToast } from "@/lib/user-facing-error";
 import { z } from "zod";
-import { uptimeGranularitySchema } from "@databuddy/shared/uptime";
+import {
+	UPTIME_GRANULARITY_OPTIONS,
+	uptimeGranularitySchema,
+} from "@databuddy/shared/uptime";
 import { useOrganizationsContext } from "@/components/providers/organizations-provider";
 import { orpc } from "@/lib/orpc";
 import { cn } from "@/lib/utils";
@@ -15,17 +19,6 @@ import { Button, Field, Input } from "@databuddy/ui";
 import { Dialog, DropdownMenu } from "@databuddy/ui/client";
 
 type Mode = "existing" | "create";
-
-const GRANULARITY_OPTIONS = [
-	{ value: "minute", label: "1m" },
-	{ value: "five_minutes", label: "5m" },
-	{ value: "ten_minutes", label: "10m" },
-	{ value: "thirty_minutes", label: "30m" },
-	{ value: "hour", label: "1h" },
-	{ value: "six_hours", label: "6h" },
-	{ value: "twelve_hours", label: "12h" },
-	{ value: "day", label: "24h" },
-] as const;
 
 const createSchema = z.object({
 	name: z.string().optional(),
@@ -53,7 +46,6 @@ export function AddMonitorDialog({
 	const { activeOrganizationId, activeOrganization } =
 		useOrganizationsContext();
 	const resolvedOrgId = activeOrganization?.id ?? activeOrganizationId ?? "";
-	const queryClient = useQueryClient();
 
 	const [mode, setMode] = useState<Mode>("existing");
 	const [selectedScheduleId, setSelectedScheduleId] = useState("");
@@ -70,10 +62,14 @@ export function AddMonitorDialog({
 		enabled: open && !!resolvedOrgId,
 	});
 
-	const addMutation = useMutation(orpc.statusPage.addMonitor.mutationOptions());
-	const createMutation = useMutation(
-		orpc.uptime.createSchedule.mutationOptions()
-	);
+	const addMutation = useMutation({
+		...orpc.statusPage.addMonitor.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
+	});
+	const createMutation = useMutation({
+		...orpc.uptime.createSchedule.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
+	});
 
 	const availableSchedules =
 		schedulesQuery.data?.filter((s) => !existingMonitorIds.includes(s.id)) ??
@@ -107,9 +103,7 @@ export function AddMonitorDialog({
 			onCompleteAction();
 			handleClose(false);
 		} catch (error) {
-			const msg =
-				error instanceof Error ? error.message : "Failed to add monitor";
-			toast.error(msg);
+			showErrorToast(error, "Failed to add monitor to status page");
 		}
 	};
 
@@ -124,9 +118,7 @@ export function AddMonitorDialog({
 			});
 			scheduleId = result.scheduleId;
 		} catch (error) {
-			const msg =
-				error instanceof Error ? error.message : "Failed to create monitor";
-			toast.error(msg);
+			showErrorToast(error, "Failed to create monitor");
 			return;
 		}
 
@@ -139,14 +131,12 @@ export function AddMonitorDialog({
 			onCompleteAction();
 			handleClose(false);
 		} catch {
-			queryClient.invalidateQueries({
-				queryKey: orpc.uptime.listSchedules.key(),
-			});
+			onCompleteAction();
 			setMode("existing");
 			setSelectedScheduleId(scheduleId);
-			toast.error(
-				"Monitor created, but adding it to the page failed. Try adding it again."
-			);
+			toast.error("Failed to add monitor to status page", {
+				description: "The monitor was created. Select it and try again.",
+			});
 		}
 	};
 
@@ -155,7 +145,7 @@ export function AddMonitorDialog({
 			<Dialog.Content className="sm:max-w-lg">
 				<Dialog.Close />
 				<Dialog.Header>
-					<Dialog.Title>Add Monitor</Dialog.Title>
+					<Dialog.Title>Add monitor</Dialog.Title>
 					<Dialog.Description>
 						Pick an existing monitor or create a new one.
 					</Dialog.Description>
@@ -187,7 +177,7 @@ export function AddMonitorDialog({
 							type="button"
 						>
 							<PlusIcon className="size-4" />
-							Create New
+							Create new
 						</button>
 					</div>
 
@@ -205,8 +195,8 @@ export function AddMonitorDialog({
 											availableSchedules.find(
 												(s) => s.id === selectedScheduleId
 											)?.url ||
-											"Select a monitor..."
-										: "Select a monitor..."}
+											"Select a monitor…"
+										: "Select a monitor…"}
 								</DropdownMenu.Trigger>
 								<DropdownMenu.Content
 									align="start"
@@ -283,16 +273,16 @@ export function AddMonitorDialog({
 								name="granularity"
 								render={({ field }) => (
 									<Field>
-										<Field.Label>Check Frequency</Field.Label>
+										<Field.Label>Check frequency</Field.Label>
 										<div className="flex items-center gap-0 rounded border">
-											{GRANULARITY_OPTIONS.map((opt, i) => {
+											{UPTIME_GRANULARITY_OPTIONS.map((opt, i) => {
 												const isActive = field.value === opt.value;
 												return (
 													<Button
 														className={cn(
 															"h-9 flex-1 cursor-pointer whitespace-nowrap rounded-none border-r px-0 font-medium text-sm last:border-r-0",
 															i === 0 && "rounded-l",
-															i === GRANULARITY_OPTIONS.length - 1 &&
+															i === UPTIME_GRANULARITY_OPTIONS.length - 1 &&
 																"rounded-r",
 															isActive
 																? "bg-accent text-accent-foreground hover:bg-accent"
@@ -325,7 +315,7 @@ export function AddMonitorDialog({
 							loading={isPending}
 							onClick={handleAddExisting}
 						>
-							Add Monitor
+							Add monitor
 						</Button>
 					</Dialog.Footer>
 				) : (
@@ -343,7 +333,7 @@ export function AddMonitorDialog({
 							onClick={form.handleSubmit(handleCreate)}
 							type="button"
 						>
-							Create & Add
+							Create and add
 						</Button>
 					</Dialog.Footer>
 				)}

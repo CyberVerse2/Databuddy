@@ -1,12 +1,28 @@
 /** biome-ignore-all lint/performance/noBarrelFile: this is a barrel file */
+import { billingMode } from "@databuddy/env/app";
+import { getBillingOwner } from "@databuddy/rpc/billing";
+import { getOrganizationOwnerId } from "@databuddy/rpc/organization";
+import {
+	type GatedFeatureId,
+	GATED_FEATURES,
+	getFeatureUnavailableMessage,
+	getNextPlanForFeature,
+	isFeatureAvailable,
+} from "@databuddy/shared/types/features";
 import { z } from "zod";
-import { QueryBuilders, suggestQueryTypes } from "./builders";
+import { getCachedWebsite } from "../lib/website-utils";
+import { getQueryBuilder, suggestQueryTypes } from "./builders";
 import { SimpleQueryBuilder } from "./simple-builder";
 import {
 	invalidFilterFieldError,
 	resolveRequestTraitFilters,
 } from "./trait-filters";
-import type { FilterOperators, QueryRequest, TimeGranularity } from "./types";
+import type {
+	CompiledQuery,
+	FilterOperators,
+	QueryRequest,
+	TimeGranularity,
+} from "./types";
 
 const FILTER_OPS = [
 	"eq",
@@ -35,36 +51,36 @@ const TIME_UNITS = [
 const filterOpEnum = z.enum(FILTER_OPS);
 const timeUnitEnum = z.enum(TIME_UNITS);
 
+export const QueryFilterSchema = z.object({
+	field: z.string(),
+	op: filterOpEnum,
+	value: z.union([
+		z.string(),
+		z.number(),
+		z.array(z.union([z.string(), z.number()])),
+	]),
+	target: z.string().optional(),
+	having: z.boolean().optional(),
+});
+
+export const MAX_QUERY_ROWS = 1000;
+
 const QuerySchema = z.object({
 	projectId: z.string(),
 	type: z.string(),
 	from: z.string(),
 	to: z.string(),
 	timeUnit: timeUnitEnum.default("day"),
-	filters: z
-		.array(
-			z.object({
-				field: z.string(),
-				op: filterOpEnum,
-				value: z.union([
-					z.string(),
-					z.number(),
-					z.array(z.union([z.string(), z.number()])),
-				]),
-				target: z.string().optional(),
-				having: z.boolean().optional(),
-			})
-		)
-		.optional(),
+	filters: z.array(QueryFilterSchema).optional(),
 	groupBy: z.array(z.string()).optional(),
 	orderBy: z.string().optional(),
-	limit: z.number().min(1).max(1000).optional(),
-	offset: z.number().min(0).optional(),
+	limit: z.number().int().min(1).max(MAX_QUERY_ROWS).optional(),
+	offset: z.number().int().min(0).optional(),
 	timezone: z.string().optional(),
 });
 
 function parseRequest(request: QueryRequest): QueryRequest {
-	return QuerySchema.parse(request) as QueryRequest;
+	return QuerySchema.parse(request);
 }
 
 function createBuilder(
@@ -72,7 +88,7 @@ function createBuilder(
 	websiteDomain?: string | null,
 	timezone?: string
 ) {
-	const config = QueryBuilders[validated.type];
+	const config = getQueryBuilder(validated.type);
 	if (!config) {
 		const suggestions = suggestQueryTypes(validated.type);
 		const hint = suggestions.length
@@ -91,7 +107,8 @@ export const executeQuery = async (
 	request: QueryRequest,
 	websiteDomain?: string | null,
 	timezone?: string,
-	abortSignal?: AbortSignal
+	abortSignal?: AbortSignal,
+	onCompiled?: (query: CompiledQuery) => void
 ) => {
 	const validated = parseRequest(request);
 	const filterError = invalidFilterFieldError(
@@ -102,8 +119,56 @@ export const executeQuery = async (
 		throw new Error(filterError);
 	}
 	const resolved = await resolveRequestTraitFilters(validated);
-	return createBuilder(resolved, websiteDomain, timezone).execute(abortSignal);
+	return createBuilder(resolved, websiteDomain, timezone).execute(
+		abortSignal,
+		onCompiled
+	);
 };
+
+const PLAN_GATED_QUERY_CATEGORIES: Record<string, GatedFeatureId> = {
+	Errors: GATED_FEATURES.ERROR_TRACKING,
+};
+
+export async function queryPlanGateError(
+	queryTypes: string[],
+	scope: { organizationId: string | null } | { websiteId: string }
+): Promise<string | null> {
+	if (billingMode() !== "live") {
+		return null;
+	}
+	const required = new Set<GatedFeatureId>();
+	for (const type of queryTypes) {
+		const category = getQueryBuilder(type)?.meta?.category;
+		const feature = category && PLAN_GATED_QUERY_CATEGORIES[category];
+		if (feature) {
+			required.add(feature);
+		}
+	}
+	if (required.size === 0) {
+		return null;
+	}
+
+	const organizationId =
+		"websiteId" in scope
+			? ((await getCachedWebsite(scope.websiteId))?.organizationId ?? null)
+			: scope.organizationId;
+	const ownerId = organizationId
+		? await getOrganizationOwnerId(organizationId)
+		: null;
+	const planId = ownerId
+		? (await getBillingOwner(ownerId, organizationId)).planId
+		: null;
+
+	for (const feature of required) {
+		if (!isFeatureAvailable(planId, feature)) {
+			return getFeatureUnavailableMessage(
+				feature,
+				getNextPlanForFeature(planId, feature)
+			);
+		}
+	}
+	return null;
+}
 
 export const compileQuery = (
 	request: QueryRequest,
@@ -111,21 +176,17 @@ export const compileQuery = (
 	timezone?: string
 ) => createBuilder(parseRequest(request), websiteDomain, timezone).compile();
 
-export {
-	areQueriesCompatible,
-	executeBatch,
-	getCompatibleQueries,
-	getSchemaGroups,
-	truncateQueryErrorForLog,
-} from "./batch-executor";
+export { executeBatch, truncateQueryErrorForLog } from "./batch-executor";
 export * from "./builders";
 export * from "./expressions";
-export { allowedFilterFields, isFilterFieldAllowed } from "./simple-builder";
 export {
-	hasTraitFilters,
+	allowedFilterFields,
+	isFilterFieldAllowed,
+	isOrderByFieldAllowed,
+} from "./simple-builder";
+export {
 	invalidFilterFieldError,
 	publicQueryErrorMessage,
-	resolveRequestTraitFilters,
 	SANITIZED_QUERY_ERROR,
 } from "./trait-filters";
 export * from "./types";

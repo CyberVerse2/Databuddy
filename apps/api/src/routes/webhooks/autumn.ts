@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import {
 	and,
 	db,
+	type EmailUnsubscribeLinks,
+	emailUnsubscribeLinks,
 	eq,
 	gt,
 	isNull,
@@ -11,7 +13,13 @@ import {
 	withTransaction,
 } from "@databuddy/db";
 import { usageAlertLog } from "@databuddy/db/schema";
-import { render, UsageAlertEmail, UsageLimitEmail } from "@databuddy/email";
+import {
+	render,
+	UsageAlertEmail,
+	usageLimitHeading,
+	usageLimitState,
+	UsageLimitEmail,
+} from "@databuddy/email";
 import { config, readBooleanEnv } from "@databuddy/env/app";
 import { buildHttpErrorResponse } from "@databuddy/shared/http-error-response";
 import { SlackProvider } from "@databuddy/notifications";
@@ -24,6 +32,7 @@ import { getAutumn } from "@databuddy/rpc";
 import { recordPlanChange } from "@databuddy/services/billing-lifecycle";
 import {
 	DATABUNNY_USAGE,
+	EVENTS_USAGE,
 	INVESTIGATION_USAGE,
 } from "@databuddy/shared/billing";
 import { Elysia } from "elysia";
@@ -49,7 +58,7 @@ const COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 const SVIX_SECRET = readBooleanEnv("SELFHOST")
 	? undefined
 	: process.env.AUTUMN_WEBHOOK_SECRET;
-const SLACK_URL = process.env.SLACK_WEBHOOK_URL ?? "";
+const SLACK_URL = config.services.slackWebhookUrl ?? "";
 
 const svix = SVIX_SECRET ? new Webhook(SVIX_SECRET) : null;
 const slack = SLACK_URL ? new SlackProvider({ webhookUrl: SLACK_URL }) : null;
@@ -253,11 +262,10 @@ function getFeatureCopy(featureId: string): BillingFeatureCopy {
 
 	if (featureId === "events") {
 		return {
-			description:
-				"Events include page views, custom events, errors, and Web Vitals collected by Databuddy.",
-			name: "Event tracking",
-			pausedActivity: "new event collection",
-			unit: "events",
+			description: EVENTS_USAGE.description,
+			name: EVENTS_USAGE.name,
+			pausedActivity: EVENTS_USAGE.pausedActivity,
+			unit: EVENTS_USAGE.unit,
 		};
 	}
 
@@ -312,11 +320,22 @@ function usagePercentage(snapshot: UsageSnapshot): number | null {
 	return Math.round((snapshot.usage / snapshot.granted) * 100);
 }
 
+function usageEmailLinks(organizationId: string): EmailUnsubscribeLinks {
+	return emailUnsubscribeLinks({
+		apiUrl: config.urls.api,
+		dashboardUrl: config.urls.dashboard,
+		organizationId,
+		secret: process.env.DATABUDDY_ENCRYPTION_KEY,
+		topic: "usage-warnings",
+	});
+}
+
 export async function sendAlertEmail(opts: {
 	customerId: string;
 	cooldownKey: string;
 	alertType: string;
 	idempotencyKey?: string;
+	links: EmailUnsubscribeLinks;
 	organizationId: string;
 	subject: string;
 	react: React.ReactElement;
@@ -328,6 +347,7 @@ export async function sendAlertEmail(opts: {
 		cooldownKey,
 		alertType,
 		idempotencyKey,
+		links,
 		organizationId,
 		subject,
 		react,
@@ -341,7 +361,7 @@ export async function sendAlertEmail(opts: {
 		});
 		return { success: true, message: "No notification recipient found" };
 	}
-	const resendApiKey = process.env.RESEND_API_KEY;
+	const resendApiKey = config.services.resendApiKey;
 	if (!resendApiKey) {
 		log.error(new Error("RESEND_API_KEY is not configured"), {
 			autumn: {
@@ -399,6 +419,7 @@ export async function sendAlertEmail(opts: {
 			subject,
 			html,
 			text,
+			headers: links.headers,
 		};
 		const result = idempotencyKey
 			? await resend.emails.send(message, { idempotencyKey })
@@ -495,17 +516,21 @@ export async function handleLimitReached(
 	}
 
 	const feature = getFeatureCopy(feature_id);
-	const isHardStop = !snapshot.isAvailable;
-	const subject = isHardStop
-		? `[Action required] ${feature.name} limit reached`
-		: `${feature.name}: included allowance used`;
+	const state = usageLimitState(snapshot.isAvailable, snapshot.overageAllowed);
+	const heading = usageLimitHeading(state, limit_type);
+	const subject =
+		state === "paused"
+			? `[Action required] ${feature.name}: ${heading}`
+			: `${feature.name}: ${heading}`;
 	mergeWideEvent({ customer_id, feature_id, limit_type });
+	const links = usageEmailLinks(organization.id);
 
 	return sendAlertEmail({
 		customerId: customer_id,
 		cooldownKey: `${feature_id}:limit:${limit_type}`,
 		alertType: limit_type,
 		idempotencyKey,
+		links,
 		organizationId: organization.id,
 		subject,
 		react: UsageLimitEmail({
@@ -518,6 +543,7 @@ export async function handleLimitReached(
 			organizationName: organization?.name,
 			overageAllowed: snapshot.overageAllowed,
 			pausedActivity: feature.pausedActivity,
+			preferences: links,
 			remainingAmount: snapshot.remaining,
 			usageAmount: snapshot.usage,
 			usageUnit: feature.unit,
@@ -574,12 +600,14 @@ export async function handleUsageAlert(
 		usage_alert_threshold: usage_alert.threshold,
 		usage_alert_type: usage_alert.threshold_type,
 	});
+	const links = usageEmailLinks(organization.id);
 
 	return sendAlertEmail({
 		customerId: customer_id,
 		cooldownKey: `${feature_id}:alert:${usage_alert.threshold_type}:${usage_alert.threshold}`,
 		alertType: `usage_alert_${usage_alert.threshold_type}`,
 		idempotencyKey,
+		links,
 		organizationId: organization.id,
 		subject,
 		react: UsageAlertEmail({
@@ -590,6 +618,7 @@ export async function handleUsageAlert(
 			organizationName: organization?.name,
 			overageAllowed: snapshot.overageAllowed,
 			pausedActivity: feature.pausedActivity,
+			preferences: links,
 			remainingAmount: snapshot.remaining,
 			usageAmount: snapshot.usage,
 			usageUnit: feature.unit,

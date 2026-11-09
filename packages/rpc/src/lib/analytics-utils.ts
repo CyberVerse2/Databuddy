@@ -113,9 +113,9 @@ export interface FunnelConversionCounts {
 }
 
 interface ReferrerRow {
-	max_step: number;
+	completed_users: number;
 	referrer: string;
-	vid: string;
+	total_users: number;
 }
 
 const ESCAPE_BACKSLASH_REGEX = /\\/g;
@@ -187,8 +187,7 @@ const buildFilterSQL = (
 ): string => {
 	const parts: string[] = [];
 
-	for (let i = 0; i < filters.length; i++) {
-		const { field, operator, value } = filters[i];
+	for (const [i, { field, operator, value }] of filters.entries()) {
 		if (!(FIELDS.has(field) && OPS.has(operator))) {
 			continue;
 		}
@@ -640,7 +639,7 @@ export const processFunnelAnalytics = async (
 ): Promise<FunnelAnalytics> => {
 	const totalSteps = steps.length;
 	if (totalSteps === 0) {
-		throw new Error("A funnel requires at least one step");
+		throw new Error("This funnel has no steps. Add a step and try again.");
 	}
 
 	let visitorFilterClause = "";
@@ -810,57 +809,91 @@ ORDER BY step_num, date`;
 	};
 };
 
+export const buildGoalAnalyticsResult = (
+	stepName: string,
+	completions: number,
+	totalWebsiteUsers: number
+): FunnelAnalytics => ({
+	overall_conversion_rate: pct(completions, totalWebsiteUsers),
+	total_users_entered: totalWebsiteUsers,
+	total_users_completed: completions,
+	avg_completion_time: 0,
+	avg_completion_time_formatted: "—",
+	biggest_dropoff_step: 1,
+	biggest_dropoff_rate: 0,
+	duration_available: false,
+	steps_analytics: [
+		{
+			step_number: 1,
+			step_name: stepName,
+			users: completions,
+			total_users: totalWebsiteUsers,
+			conversion_rate: pct(completions, totalWebsiteUsers),
+			dropoffs: 0,
+			dropoff_rate: 0,
+			avg_time_to_complete: 0,
+			error_context_available: false,
+			error_count: 0,
+			error_rate: 0,
+			top_errors: [],
+		},
+	],
+	error_insights: {
+		available: false,
+		total_errors: 0,
+		sessions_with_errors: 0,
+		dropoffs_with_errors: 0,
+		error_correlation_rate: 0,
+	},
+});
+
 export const processGoalAnalytics = async (
 	steps: AnalyticsStep[],
 	filters: Filter[],
 	params: ClickhouseQueryParams,
-	totalWebsiteUsers: number,
+	totalWebsiteUsers: number | PromiseLike<number>,
 	abortSignal?: AbortSignal
 ): Promise<FunnelAnalytics> => {
 	const step = steps[0];
 	if (!step) {
-		throw new Error("A goal requires one step");
+		throw new Error("This goal has no target. Add one and try again.");
 	}
-	const completions = await processGoalConversionCount(
-		step,
-		filters,
+	const [completions, totalUsers] = await Promise.all([
+		processGoalConversionCount(step, filters, params, abortSignal),
+		totalWebsiteUsers,
+	]);
+
+	return buildGoalAnalyticsResult(step.name, completions, totalUsers);
+};
+
+export const processGoalsConversionCountsBatch = async (
+	steps: AnalyticsStep[],
+	params: ClickhouseQueryParams,
+	abortSignal?: AbortSignal
+): Promise<Map<number, number>> => {
+	if (steps.length === 0) {
+		return new Map();
+	}
+
+	const query = `WITH ${visitorIdentityCtes},
+${buildIdentifiedEventStream(steps, [], params)}
+SELECT step AS step_num, uniqExact(vid) AS completions
+FROM events
+GROUP BY step_num`;
+	const rows = await chQuery<{ step_num: number; completions: number }>(
+		query,
 		params,
-		abortSignal
+		{ abort_signal: abortSignal }
 	);
 
-	return {
-		overall_conversion_rate: pct(completions, totalWebsiteUsers),
-		total_users_entered: totalWebsiteUsers,
-		total_users_completed: completions,
-		avg_completion_time: 0,
-		avg_completion_time_formatted: "—",
-		biggest_dropoff_step: 1,
-		biggest_dropoff_rate: 0,
-		duration_available: false,
-		steps_analytics: [
-			{
-				step_number: 1,
-				step_name: step.name,
-				users: completions,
-				total_users: totalWebsiteUsers,
-				conversion_rate: pct(completions, totalWebsiteUsers),
-				dropoffs: 0,
-				dropoff_rate: 0,
-				avg_time_to_complete: 0,
-				error_context_available: false,
-				error_count: 0,
-				error_rate: 0,
-				top_errors: [],
-			},
-		],
-		error_insights: {
-			available: false,
-			total_errors: 0,
-			sessions_with_errors: 0,
-			dropoffs_with_errors: 0,
-			error_correlation_rate: 0,
-		},
-	};
+	const result = new Map<number, number>();
+	for (const row of rows) {
+		result.set(
+			toFiniteNumber(row.step_num, 0),
+			toFiniteNumber(row.completions, 0)
+		);
+	}
+	return result;
 };
 
 export const processFunnelAnalyticsByReferrer = async (
@@ -879,14 +912,22 @@ export const processFunnelAnalyticsByReferrer = async (
 
 	const fullQuery = `WITH ${visitorIdentityCtes},
 ${buildIdentifiedEventStream(steps, filters, params, { includeReferrer: true })},
-step_events AS (SELECT DISTINCT step, vid, ts, ref FROM events)
+step_events AS (SELECT DISTINCT step, vid, ts, ref FROM events),
+visitor_referrers AS (
+	SELECT
+		windowFunnel(86400000)(toUInt64(toUnixTimestamp64Milli(ts)), ${stepConditions}) AS max_step,
+		argMinIf(ref, ts, step = 1) AS first_referrer
+	FROM step_events
+	GROUP BY vid
+	HAVING max_step >= 1
+)
 SELECT
-	vid,
-	windowFunnel(86400000)(toUInt64(toUnixTimestamp64Milli(ts)), ${stepConditions}) as max_step,
-	argMinIf(ref, ts, step = 1) as referrer
-FROM step_events
-GROUP BY vid
-HAVING max_step >= 1`;
+	first_referrer AS referrer,
+	count() AS total_users,
+	countIf(max_step >= ${totalSteps}) AS completed_users
+FROM visitor_referrers
+GROUP BY first_referrer
+ORDER BY total_users DESC, referrer`;
 
 	const rows = await chQuery<ReferrerRow>(fullQuery, params, {
 		abort_signal: abortSignal,
@@ -901,17 +942,14 @@ HAVING max_step >= 1`;
 		const ref = String(row.referrer ?? "") || "Direct";
 		const parsed = parseReferrer(ref);
 		const key = parsed.domain || "direct";
-		const maxStep = toFiniteNumber(row.max_step, 0);
 
 		let group = groups.get(key);
 		if (!group) {
 			group = { parsed, total: 0, completed: 0 };
 			groups.set(key, group);
 		}
-		group.total++;
-		if (maxStep >= totalSteps) {
-			group.completed++;
-		}
+		group.total += toFiniteNumber(row.total_users, 0);
+		group.completed += toFiniteNumber(row.completed_users, 0);
 	}
 
 	const analytics: ReferrerAnalytics[] = [];

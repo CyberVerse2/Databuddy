@@ -4,7 +4,10 @@ import {
 	alarms,
 	alarmTriggerTypeValues,
 } from "@databuddy/db/schema";
+import { MAX_ALARM_DESTINATIONS } from "@databuddy/notifications";
 import { ratelimit } from "@databuddy/redis/rate-limit";
+import { SLACK_WEBHOOK_PATTERN } from "@databuddy/shared/uptime";
+import { createSelectSchema } from "drizzle-orm/zod";
 import { randomUUIDv7 } from "bun";
 import { z } from "zod";
 import { rpcError } from "../errors";
@@ -17,8 +20,6 @@ import { type Context, protectedProcedure, trackedProcedure } from "../orpc";
 import { withResource } from "../procedures/with-resource";
 import { withWorkspace } from "../procedures/with-workspace";
 
-const SLACK_WEBHOOK_PATTERN =
-	/^https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[A-Za-z0-9]+$/;
 const FORBIDDEN_HEADER_NAMES = new Set([
 	"authorization",
 	"cookie",
@@ -38,12 +39,14 @@ const webhookHeadersSchema = z
 			.min(1)
 			.max(128)
 			.refine((name) => !FORBIDDEN_HEADER_NAMES.has(name.toLowerCase()), {
-				message: "Header name is not allowed.",
+				message:
+					"This header cannot be set on a webhook. Use a different header name.",
 			}),
 		z.string().max(2048)
 	)
 	.refine((rec) => Object.keys(rec).length <= 20, {
-		message: "At most 20 custom webhook headers are allowed.",
+		message:
+			"A webhook can have at most 20 custom headers. Remove some and try again.",
 	});
 
 const slackDestinationSchema = z.object({
@@ -52,7 +55,7 @@ const slackDestinationSchema = z.object({
 		.string()
 		.regex(
 			SLACK_WEBHOOK_PATTERN,
-			"Slack destination must be a hooks.slack.com webhook URL"
+			"Enter a Slack webhook URL that starts with https://hooks.slack.com."
 		),
 	config: z.record(z.string(), z.unknown()).default({}),
 });
@@ -61,10 +64,10 @@ const webhookDestinationSchema = z.object({
 	type: z.literal("webhook"),
 	identifier: z
 		.string()
-		.url("Webhook destination must be a valid URL")
+		.url("Enter a valid webhook URL.")
 		.refine(
 			(url) => url.startsWith("http://") || url.startsWith("https://"),
-			"Webhook destination must use http(s)"
+			"Webhook URLs must start with http:// or https://."
 		),
 	config: z
 		.object({
@@ -87,7 +90,14 @@ const destinationSchema = z.discriminatedUnion("type", [
 	emailDestinationSchema,
 ]);
 
-const alarmOutputSchema = z.record(z.string(), z.unknown());
+const jsonRecord = z.record(z.string(), z.unknown());
+const alarmOutputSchema = createSelectSchema(alarms, {
+	triggerConditions: jsonRecord,
+}).extend({
+	destinations: z.array(
+		createSelectSchema(alarmDestinations, { config: jsonRecord })
+	),
+});
 
 function maskTail(value: string, keep = 4): string {
 	if (value.length <= keep) {
@@ -97,23 +107,28 @@ function maskTail(value: string, keep = 4): string {
 }
 
 interface RedactableDestination {
-	config: unknown;
+	config: Record<string, unknown>;
 	identifier: string;
 	type: string;
 }
 
 function redactDestination<T extends RedactableDestination>(d: T): T {
-	const cfg = (d.config ?? {}) as Record<string, unknown>;
-	const headers = cfg.headers as Record<string, string> | undefined;
-	const redactedHeaders = headers
-		? Object.fromEntries(
-				Object.entries(headers).map(([name, value]) => [name, maskTail(value)])
-			)
-		: headers;
+	const { headers } = d.config;
 	return {
 		...d,
 		identifier: d.type === "email" ? d.identifier : maskTail(d.identifier),
-		config: redactedHeaders ? { ...cfg, headers: redactedHeaders } : cfg,
+		config:
+			headers && typeof headers === "object"
+				? {
+						...d.config,
+						headers: Object.fromEntries(
+							Object.entries(headers).map(([name, value]) => [
+								name,
+								typeof value === "string" ? maskTail(value) : value,
+							])
+						),
+					}
+				: d.config,
 	};
 }
 
@@ -156,7 +171,7 @@ export const alarmsRouter = {
 		.handler(async ({ context, input }) => {
 			const orgId = input.organizationId ?? context.organizationId;
 			if (!orgId) {
-				throw rpcError.badRequest("Organization ID is required");
+				throw rpcError.badRequest("Select an organization and try again.");
 			}
 
 			await withWorkspace(context, {
@@ -190,14 +205,15 @@ export const alarmsRouter = {
 			z.object({
 				organizationId: z.string(),
 				websiteId: z.string().optional(),
-				name: z.string().min(1, "Name is required"),
+				name: z.string().min(1, "Enter a name for this alert."),
 				description: z.string().optional(),
 				enabled: z.boolean().default(true),
 				triggerType: z.enum(alarmTriggerTypeValues),
 				triggerConditions: z.record(z.string(), z.unknown()).default({}),
 				destinations: z
 					.array(destinationSchema)
-					.min(1, "At least one destination is required"),
+					.min(1, "Add at least one place to send this alert.")
+					.max(MAX_ALARM_DESTINATIONS),
 			})
 		)
 		.output(alarmOutputSchema)
@@ -268,7 +284,10 @@ export const alarmsRouter = {
 				websiteId: z.string().nullish(),
 				triggerType: z.enum(alarmTriggerTypeValues).optional(),
 				triggerConditions: z.record(z.string(), z.unknown()).optional(),
-				destinations: z.array(destinationSchema).optional(),
+				destinations: z
+					.array(destinationSchema)
+					.max(MAX_ALARM_DESTINATIONS)
+					.optional(),
 			})
 		)
 		.output(alarmOutputSchema)
@@ -383,7 +402,9 @@ export const alarmsRouter = {
 			}
 
 			if (!alarm.destinations || alarm.destinations.length === 0) {
-				throw rpcError.badRequest("Alarm has no destinations configured");
+				throw rpcError.badRequest(
+					"This alert has nowhere to send notifications. Add a destination and try again."
+				);
 			}
 
 			const targets = toNotificationTargets(alarm.destinations);
