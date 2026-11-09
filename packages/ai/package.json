@@ -16,6 +16,7 @@
     "./agents/types": "./src/ai/agents/types.ts",
     "./config/context": "./src/ai/config/context.ts",
     "./config/models": "./src/ai/config/models.ts",
+    "./evaluation": "./src/ai/evaluation.ts",
     "./lib/accessible-websites": "./src/lib/accessible-websites.ts",
     "./lib/ai-logger": "./src/lib/ai-logger.ts",
     "./lib/databuddy": "./src/lib/databuddy.ts",

@@ -1,22 +1,11 @@
-import { z } from "zod";
-import { SLACK_REPLY_RELEVANCE_INSTRUCTIONS } from "../ai/prompts/analytics";
+import { evaluateQuestions, isEvaluationAvailable } from "../ai/evaluation";
 import type { DatabuddyAgentSlackMessage } from "../ai/mcp/slack-context";
+import { SLACK_REPLY_RELEVANCE_INSTRUCTIONS } from "../ai/prompts/analytics";
 
-const RELEVANCE_ENDPOINT =
-	"https://ai-gateway.vercel.sh/v4/ai/evaluation-model";
-const DEFAULT_TIMEOUT_MS = 2000;
+const DEFAULT_TIMEOUT_MS = 6000;
 const MAX_THREAD_MESSAGES = 30;
 const MAX_THREAD_MESSAGE_CHARS = 1000;
 const REPLY_THRESHOLD = 0.5;
-
-const ReplyEvaluationSchema = z.object({
-	answers: z.strictObject({
-		reply: z.object({
-			type: z.literal("boolean"),
-			probability: z.number().min(0).max(1),
-		}),
-	}),
-});
 
 export interface SlackThreadReplyRelevance {
 	confidence: number;
@@ -39,16 +28,15 @@ export async function classifySlackThreadReplyRelevance({
 	threadMessages = [],
 	timeoutMs = DEFAULT_TIMEOUT_MS,
 }: SlackThreadReplyRelevanceInput): Promise<SlackThreadReplyRelevance | null> {
-	const apiKey = (process.env.AI_GATEWAY_API_KEY ?? "").trim();
-	if (!apiKey) {
+	if (!isEvaluationAvailable()) {
 		return null;
 	}
 
 	const signal = AbortSignal.timeout(timeoutMs);
 
 	try {
-		const body = JSON.stringify({
-			providerOptions: { gateway: { zeroDataRetention: true } },
+		const { answers } = await evaluateQuestions({
+			abortSignal: signal,
 			questions: {
 				reply: {
 					type: "boolean",
@@ -67,29 +55,13 @@ export async function classifySlackThreadReplyRelevance({
 					})),
 			},
 		});
-		const response = await fetch(RELEVANCE_ENDPOINT, {
-			method: "POST",
-			signal,
-			headers: {
-				authorization: `Bearer ${apiKey}`,
-				"content-type": "application/json",
-				"ai-evaluation-model-specification-version": "4",
-				"ai-gateway-auth-method": "api-key",
-				"ai-gateway-protocol-version": "0.0.1",
-				"ai-model-id": "typesafe-ai/jev",
-			},
-			body,
-		});
-		if (!response.ok) {
-			return null;
-		}
-		const parsed = ReplyEvaluationSchema.safeParse(await response.json());
 		signal.throwIfAborted();
-		if (!parsed.success) {
+		const reply = answers.reply;
+		if (reply?.type !== "boolean") {
 			return null;
 		}
 
-		const probability = parsed.data.answers.reply.probability;
+		const probability = reply.probability;
 		const shouldReply = probability >= REPLY_THRESHOLD;
 		return {
 			confidence: shouldReply ? probability : 1 - probability,

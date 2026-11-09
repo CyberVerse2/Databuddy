@@ -32,47 +32,11 @@ export const AGENT_MODEL_COSTS_USD_PER_MILLION: Record<
 	AgentModelCostUsdPerMillion
 > = {
 	[AGENT_PRICING_BASELINE_MODEL_ID]: AGENT_PRICING_BASELINE_COST,
-	"google/gemini-2.5-flash-lite": {
-		input: 0.1,
-		output: 0.4,
-		cache_read: 0.01,
-		cache_write: 0,
-	},
-	"deepseek/deepseek-v4-flash": {
-		input: 0.14,
-		output: 0.28,
-		cache_read: 0.028,
-		cache_write: 0,
-	},
-	"openai/gpt-oss-120b": {
+	"claude-haiku-5-5": {
 		input: 0.1,
 		output: 0.5,
-		cache_read: 0,
-		cache_write: 0,
-	},
-	"openai/gpt-5.6-terra": {
-		input: 2.5,
-		output: 15,
-		cache_read: 0.25,
-		cache_write: 3.125,
-	},
-	"typesafe-ai/jev": {
-		input: 0.042,
-		output: 0,
-		cache_read: 0,
-		cache_write: 0,
-	},
-	"openai/gpt-6.1-sol": {
-		input: 2,
-		output: 10,
-		cache_read: 0.1,
-		cache_write: 2.5,
-	},
-	"openai/gpt-5.6-luna": {
-		input: 0.2,
-		output: 1.2,
-		cache_read: 0.02,
-		cache_write: 0.25,
+		cache_read: 0.01,
+		cache_write: 0.2,
 	},
 };
 
@@ -80,9 +44,9 @@ export function lookupAgentModelCost(
 	modelId: string,
 	inputTokens = 0
 ): ResolvedAgentModelCost | null {
-	if (modelId === "openai/gpt-6.1-sol" && inputTokens > 272_000) {
+	if (modelId === "claude-haiku-5-5" && inputTokens > 100_000) {
 		return {
-			cost: { input: 4, output: 15, cache_read: 0.2, cache_write: 5 },
+			cost: { input: 0.5, output: 2.5, cache_read: 0.05, cache_write: 1 },
 			fallback: false,
 			id: modelId,
 		};

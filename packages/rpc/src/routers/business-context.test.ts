@@ -25,7 +25,7 @@ let cleanupFinished = Promise.withResolvers<void>();
 let conflict = false;
 let state: OrganizationBusinessContext;
 const originalEnv = {
-	AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
+	ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
 	CONTEXT_DEV_API_KEY: process.env.CONTEXT_DEV_API_KEY,
 	AUTUMN_SECRET_KEY: process.env.AUTUMN_SECRET_KEY,
 	NODE_ENV: process.env.NODE_ENV,
@@ -208,7 +208,7 @@ beforeAll(async () => {
 }, 30_000);
 
 beforeEach(() => {
-	process.env.AI_GATEWAY_API_KEY = "synthetic-model-key";
+	process.env.ANTHROPIC_API_KEY = "synthetic-model-key";
 	process.env.CONTEXT_DEV_API_KEY = "synthetic-scraper-key";
 	process.env.AUTUMN_SECRET_KEY = "synthetic-native-transport-only";
 	process.env.NODE_ENV = "test";
@@ -688,7 +688,7 @@ test("missing or mismatched billing identities fail closed", async () => {
 });
 
 test.each([
-	"AI_GATEWAY_API_KEY",
+	"ANTHROPIC_API_KEY",
 	"CONTEXT_DEV_API_KEY",
 ])("missing %s disables generation without checking billing", async (key) => {
 	delete process.env[key];
@@ -757,7 +757,7 @@ test("self-hosted production requires AI setup and admin access, without Autumn"
 		role = "viewer";
 		expect(await access()).toMatchObject({ status: "read-only" });
 		role = "owner";
-		Reflect.deleteProperty(process.env, "AI_GATEWAY_API_KEY");
+		Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
 		expect(await access()).toMatchObject({ status: "not-configured" });
 		expect(billingRequests).toEqual([]);
 	} finally {

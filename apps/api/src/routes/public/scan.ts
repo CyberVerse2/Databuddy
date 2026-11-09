@@ -1,12 +1,17 @@
 import { createHmac } from "node:crypto";
+import {
+	type EvaluationQuestion,
+	evaluateQuestions,
+	isEvaluationAvailable,
+} from "@databuddy/ai/evaluation";
 import { captureError, mergeWideEvent } from "@databuddy/ai/lib/tracing";
 import { runRateLimitCommand } from "@databuddy/redis";
 import { getRateLimitHeaders, ratelimit } from "@databuddy/redis/rate-limit";
 import {
 	createRequest,
+	type JsonValue,
 	parseResponse,
 	type Row,
-	requestEvaluation,
 	scanRequestSchema,
 } from "@databuddy/scan/src/evaluate";
 import { recordSelfAnalyticsEvent } from "@databuddy/services/billing-lifecycle";
@@ -163,9 +168,8 @@ export const scanRoute = new Elysia({ prefix: "/v1/scan" }).post(
 		if (!parsed?.success) {
 			return reject(request, 400, "BAD_REQUEST", "Invalid scan request");
 		}
-		const apiKey = (process.env.AI_GATEWAY_API_KEY ?? "").trim();
-		if (!apiKey) {
-			captureError(new Error("AI_GATEWAY_API_KEY is not set"), {
+		if (!isEvaluationAvailable()) {
+			captureError(new Error("ANTHROPIC_API_KEY is not set"), {
 				scan_route: true,
 			});
 			return reject(
@@ -182,23 +186,28 @@ export const scanRoute = new Elysia({ prefix: "/v1/scan" }).post(
 				captureError(error, { scan_event: "scan_run_started" })
 			);
 		}
-		let gatewayStatus: number | null = null;
+		let evaluated = false;
 		try {
-			const raw = await requestEvaluation(createRequest(segments, catalog), {
-				apiKey,
-				attempts: 2,
-				timeoutMs: 15_000,
-				signal: request.signal,
-				onAttempt: (attempt) => {
-					gatewayStatus = attempt.status;
-					mergeWideEvent({
-						scan_gateway_status: attempt.status ?? 0,
-						scan_gateway_ms: attempt.ms,
-					});
-				},
-				onRetry: () => undefined,
+			const { state, questions } = JSON.parse(
+				createRequest(segments, catalog)
+			) as { state: unknown; questions: Record<string, EvaluationQuestion> };
+			const started = performance.now();
+			const raw = await evaluateQuestions({
+				state,
+				questions,
+				abortSignal: AbortSignal.any([
+					request.signal,
+					AbortSignal.timeout(30_000),
+				]),
 			});
-			const { rows, inputTokens, outputTokens } = parseResponse(raw, segments);
+			evaluated = true;
+			mergeWideEvent({
+				scan_model_ms: Math.round(performance.now() - started),
+			});
+			const { rows, inputTokens, outputTokens } = parseResponse(
+				raw as unknown as JsonValue,
+				segments
+			);
 			mergeWideEvent({
 				scan_gaps: rows.filter(
 					(row) => row.coverage === "missing" || row.coverage === "partial"
@@ -215,9 +224,9 @@ export const scanRoute = new Elysia({ prefix: "/v1/scan" }).post(
 			mergeWideEvent({
 				scan_failed: timedOut
 					? "timeout"
-					: gatewayStatus === 200
+					: evaluated
 						? "invalid_response"
-						: `gateway_${gatewayStatus ?? "network"}`,
+						: "model_error",
 			});
 			return reject(
 				request,

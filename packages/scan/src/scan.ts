@@ -35,8 +35,7 @@ export const scanOptionsSchema = z.object({
 });
 const concurrency = 8;
 const batchFiles = 2;
-const gatewayTimeoutMs = 15_000;
-const hostedTimeoutMs = 2 * gatewayTimeoutMs + 5000;
+const hostedTimeoutMs = 35_000;
 const maxRequestBytes = 48_000;
 const attemptSchema = z.object({
 	attempt: z.number(),
@@ -67,9 +66,7 @@ const resultSchema = z.object({
 		finishedAt: z.string(),
 		destination: z.object({
 			host: z.string(),
-			kind: z.enum(["databuddy", "gateway"]),
 		}),
-		zeroDataRetention: z.literal(true),
 		interrupted: z.boolean(),
 		includedFiles: z.number(),
 		skippedFiles: z.number(),
@@ -101,9 +98,6 @@ const excluded =
 	/(?:^|\/)(?:tests?|__tests__|fixtures?|__fixtures__|__mocks__|examples?|playground|e2e|cypress|playwright|node_modules|dist|\.next|\.agents|\.codex|vendor)(?:\/|$)|\.(?:test|spec|stories|generated|d)\.[^.]+$/i;
 const sourceFile =
 	/\.(?:[cm]?[jt]sx?|vue|svelte|astro|swift|py|sh|sql|html?|css)$/;
-const repositoryKey =
-	/^[ \t]*(?:export[ \t]+)?AI_GATEWAY_API_KEY[ \t]*=[ \t]*(.*?)[ \t]*$/m;
-const quoted = /^(["'])(.*)\1$/;
 const routeHandlerLabel =
 	/^(?:GET|POST|PUT|PATCH|DELETE)$|^(?:get|post|put|patch|delete|all) \//;
 const reviewable = /\.(?:[cm]?[jt]sx?|vue|svelte|astro|swift|py)$/;
@@ -454,10 +448,9 @@ function firstArgument(text: string) {
 			.join("")
 	);
 }
-const safeError = /^Gateway HTTP [0-9]{3}$/;
-const shedError = /^(?:Gateway HTTP 5[0-9]{2}|Gateway request timed out)$/;
+const safeError = /^Scan HTTP [0-9]{3}$/;
+const shedError = /^(?:Scan HTTP 5[0-9]{2}|Scan request timed out)$/;
 const splitDepth = 2;
-const keyHelp = "Check the key, or unset it to use Databuddy's scan API.";
 const catalogByteLimit = 24_000;
 const entryPath = /((?:[\w@.()[\]-]+\/)+[\w@.()[\]-]+\.\w+):\d/;
 const entrySymbol = /^([\w$.]+)/;
@@ -689,7 +682,6 @@ async function readSources(root: string, scope = "") {
 
 export interface Destination {
 	host: string;
-	kind: "databuddy" | "gateway";
 }
 export interface SentFile {
 	lines: [number, number][];
@@ -863,17 +855,8 @@ export async function scan(
 		noActionFiles,
 		catalog,
 	});
-	const apiKey =
-		process.env.AI_GATEWAY_API_KEY?.trim() ||
-		repositoryKey
-			.exec(await readFile(join(root, ".env"), "utf8").catch(() => ""))?.[1]
-			?.trim()
-			.replace(quoted, "$2") ||
-		undefined;
-	const timeoutMs = apiKey ? gatewayTimeoutMs : hostedTimeoutMs;
-	const destination: Destination = apiKey
-		? { host: "ai-gateway.vercel.sh", kind: "gateway" }
-		: { host: new URL(hostedScanUrl).host, kind: "databuddy" };
+	const timeoutMs = hostedTimeoutMs;
+	const destination: Destination = { host: new URL(hostedScanUrl).host };
 	if (options.dryRun) {
 		return {
 			dryRun: true as const,
@@ -1015,7 +998,6 @@ export async function scan(
 					call.split = true;
 				} else if (!call.cached) {
 					response = await requestEvaluation(body, {
-						apiKey,
 						attempts: splittable ? 2 : undefined,
 						run: runId,
 						timeoutMs,
@@ -1042,7 +1024,7 @@ export async function scan(
 						: error instanceof Error && safeError.test(error.message)
 							? error.message
 							: error instanceof Error && error.name === "TimeoutError"
-								? "Gateway request timed out"
+								? "Scan request timed out"
 								: error instanceof Error && "code" in error
 									? `Scan failed (${String(error.code)})`
 									: "Scan failed";
@@ -1102,15 +1084,9 @@ export async function scan(
 		}
 		const statuses = calls.flatMap((c) => c.attempts).map((a) => a.status);
 		const failures = calls.filter((c) => c.error && !c.split).length;
-		const denied = statuses.find((status) => status === 401 || status === 403);
-		if (apiKey && denied) {
+		if (failures && statuses.includes(429)) {
 			throw new Error(
-				`Vercel AI Gateway rejected AI_GATEWAY_API_KEY (HTTP ${denied}). ${keyHelp}`
-			);
-		}
-		if (!apiKey && failures && statuses.includes(429)) {
-			throw new Error(
-				"Databuddy's scan API rate limit was reached. Try again later, or set AI_GATEWAY_API_KEY to use your own Vercel AI Gateway key."
+				"Databuddy's scan API rate limit was reached. Try again later."
 			);
 		}
 		rows.sort(
@@ -1124,11 +1100,10 @@ export async function scan(
 			root,
 			scope,
 			head,
-			model: "typesafe-ai/jev",
+			model: "claude-haiku-5-5",
 			runId,
 			finishedAt: new Date().toISOString(),
 			destination,
-			zeroDataRetention: true,
 			interrupted,
 			includedFiles,
 			skippedFiles: noActionFiles.length,

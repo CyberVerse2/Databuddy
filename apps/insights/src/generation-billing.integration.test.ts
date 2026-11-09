@@ -177,7 +177,7 @@ integration("native generation fixed-unit persistence", () => {
 			if (fail) {
 				throw new agent.InsightAgentExecutionError({
 					cause: new Error("Synthetic model failure"),
-					modelId: "openai/gpt-5.6-luna",
+					modelId: "claude-haiku-5-5",
 					usage,
 					toolCallCount: 1,
 				});
@@ -193,7 +193,7 @@ integration("native generation fixed-unit persistence", () => {
 			});
 			snapshot.completion = complete ? "complete" : "incomplete";
 			return {
-				modelId: "openai/gpt-5.6-luna",
+				modelId: "claude-haiku-5-5",
 				usage,
 				toolCallCount: 1,
 				completion: complete ? "complete" : undefined,
@@ -815,7 +815,7 @@ integration("native generation fixed-unit persistence", () => {
 			return {
 				completion: "incomplete",
 				outcome,
-				modelId: "openai/gpt-5.6-luna",
+				modelId: "claude-haiku-5-5",
 				usage,
 				toolCallCount: 1,
 				snapshot: createEvidenceSnapshot({
@@ -1029,7 +1029,7 @@ integration("native generation fixed-unit persistence", () => {
 		);
 		expect(telemetry).toHaveBeenCalledTimes(1);
 		expect(telemetry.mock.calls[0]?.[0]).toMatchObject({
-			modelId: "openai/gpt-5.6-luna",
+			modelId: "claude-haiku-5-5",
 			usage,
 		});
 		const first = reservationsSince(0)[0]!;

@@ -9,8 +9,8 @@ icon: "Shield"
 ## Check before you send
 
 - `npx @databuddy/scan --dry-run` lists every file and line range that would be sent, and sends nothing.
-- `npx @databuddy/scan --dry-run --json` prints every code segment and the tracking catalog that would be sent. Real requests carry the same data split into batches of up to four segments; with your own gateway key they also include the scanner's fixed classification instructions.
-- `npx @databuddy/scan <folder>` sends code only from that folder. It still reads the rest of the repository locally, with the same exclusions, to find existing tracking, and sends that as a list of event names and `file:line` references so actions tracked elsewhere are not reported as missing. It also reads the repository root's `.env`, only to look for `AI_GATEWAY_API_KEY`.
+- `npx @databuddy/scan --dry-run --json` prints every code segment and the tracking catalog that would be sent. Real requests carry the same data split into batches of up to four segments.
+- `npx @databuddy/scan <folder>` sends code only from that folder. It still reads the rest of the repository locally, with the same exclusions, to find existing tracking, and sends that as a list of event names and `file:line` references so actions tracked elsewhere are not reported as missing.
 
 Before sending anything, the CLI prints where the code is going and how many files it comes from.
 
@@ -28,7 +28,7 @@ Secret detection is a safeguard, not a guarantee. Review `--dry-run` output for 
 
 ## Where it goes
 
-By default, requests go to Databuddy's scan API at `api.databuddy.cc`. The API forwards them to the Jev model (`typesafe-ai/jev`) on [Vercel AI Gateway](https://vercel.com/docs/ai-gateway) with zero data retention required on every call, which limits routing to providers that do not retain prompts or outputs.
+Requests go to Databuddy's scan API at `api.databuddy.cc`. The API forwards them to Claude, which classifies each action.
 
 The API holds your code in memory only while it answers the request. It does not write source code to logs, databases, caches or error reports, and does not use it to train models. It returns only classification labels, never generated text.
 
@@ -39,17 +39,13 @@ Scan request logs contain these fields. Routine successful requests are sampled,
 - method, path, status, duration and request size;
 - the HTTP client's user agent, for example `node`;
 - a random run ID generated per scan and the CLI version;
-- the number of code segments, the model gateway's status and timing, input token count, and how many findings were missing or covered.
+- the number of code segments, the model's status and timing, input token count, and how many findings were missing or covered.
 
 The first request of each run also records a `scan_run_started` event in Databuddy's own analytics, keyed by the random run ID, with the CLI version. This is how we count scans.
 
 For rate limiting (600 requests a minute, 5,000 a day), your IP address is hashed with a server secret and used as a Redis key that expires with its window. The IP address itself is not logged or stored.
 
 Nothing recorded contains source code, file paths, repository names, Git remotes or account details. Logs are processed by Axiom and Superlog.
-
-## Keep your code off Databuddy
-
-Set `AI_GATEWAY_API_KEY` to your own Vercel AI Gateway key, in your shell or in the scanned repository's `.env` file. Requests then go directly from your machine to your Vercel account with the same zero data retention setting, and Databuddy receives nothing. The scanner reads only that one variable from `.env`.
 
 ## What stays on your machine
 

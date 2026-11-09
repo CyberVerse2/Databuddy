@@ -62,10 +62,11 @@ const response = {
 		q1: { type: "boolean" as const, probability: 0.1 },
 		q2: { type: "boolean" as const, probability: 0.9 },
 	},
+	modelId: "claude-haiku-5-5",
 	usage: { inputTokens: 100, outputTokens: 3 },
 };
 
-describe("Jev optional context ranking", () => {
+describe("optional context ranking", () => {
 	it("freezes ranked context through the real investigation planner seam", async () => {
 		let rankingCalls = 0;
 		const candidates = await planInvestigationsWithBusinessContext(
@@ -120,9 +121,6 @@ describe("Jev optional context ranking", () => {
 		let usageCalls = 0;
 		const evaluate: Evaluate = async (request) => {
 			calls++;
-			expect(request.providerOptions).toEqual({
-				gateway: { zeroDataRetention: true },
-			});
 			expect(
 				(typeof request.state === "string"
 					? JSON.parse(request.state)
@@ -142,7 +140,7 @@ describe("Jev optional context ranking", () => {
 				...input,
 				onUsage: (usage) => {
 					usageCalls++;
-					expect(usage.modelId).toBe("typesafe-ai/jev");
+					expect(usage.modelId).toBe("claude-haiku-5-5");
 					expect(usage.usage.totalTokens).toBe(103);
 				},
 			},
@@ -220,22 +218,6 @@ describe("Jev optional context ranking", () => {
 			return Promise.reject(new Error("Synthetic provider failure"));
 		});
 		expect(calls).toBe(1);
-		expect(result).toEqual(mergeBusinessContext(...input.contexts));
-	});
-	it("aborts the optional request after one second", async () => {
-		const started = performance.now();
-		const result = await rankInvestigationBusinessContext(
-			input,
-			({ abortSignal }) =>
-				new Promise((_, reject) => {
-					abortSignal.addEventListener(
-						"abort",
-						() => reject(abortSignal.reason),
-						{ once: true }
-					);
-				})
-		);
-		expect(performance.now() - started).toBeLessThan(1500);
 		expect(result).toEqual(mergeBusinessContext(...input.contexts));
 	});
 });

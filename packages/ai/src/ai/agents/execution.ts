@@ -11,7 +11,7 @@ import { getOrganizationOwnerId } from "@databuddy/rpc/organization";
 import type { RequestLogger } from "evlog";
 import { AgentError } from "../../agent/errors";
 import { trackAgentEvent } from "../../lib/databuddy";
-import type { AgentSource } from "../config/models";
+import { type AgentSource, hasAiKey } from "../config/models";
 import { captureError, mergeWideEvent } from "../../lib/tracing";
 import {
 	summarizeAgentUsage,
@@ -96,7 +96,7 @@ export async function resolveAgentBillingCustomerId(principal: {
 export async function getAgentBillingAccess(
 	billingCustomerId: string | null
 ): Promise<AgentBillingAccess> {
-	if (readBooleanEnv("SELFHOST") && !process.env.AI_GATEWAY_API_KEY?.trim()) {
+	if (readBooleanEnv("SELFHOST") && !hasAiKey()) {
 		throw new AgentError(
 			"provider_unavailable",
 			"Ask your administrator to configure AI before using Databunny."

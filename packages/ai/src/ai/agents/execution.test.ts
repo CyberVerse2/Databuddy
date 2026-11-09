@@ -218,7 +218,7 @@ describe("trackAgentUsage", () => {
 		const requestLogger = createLogger({ test: true });
 		const summary = trackAgentUsage({
 			requestLogger,
-			modelId: "openai/gpt-5.6-luna",
+			modelId: "claude-haiku-5-5",
 			source: "dashboard",
 			usage: { inputTokens: 1000, outputTokens: 100 },
 		});
@@ -228,13 +228,13 @@ describe("trackAgentUsage", () => {
 	it("retains model costs without consuming credits when billing is configured", () => {
 		const summary = trackAgentUsage({
 			billingCustomerId: "owner:synthetic-org",
-			modelId: "openai/gpt-5.6-luna",
+			modelId: "claude-haiku-5-5",
 			source: "insights",
 			usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 },
 		});
 
 		expect(summary.cost_fallback).toBe(false);
-		expect(summary.cost_total_usd).toBe(1.4);
+		expect(summary.cost_total_usd).toBe(3);
 		expect(mockMergeWideEvent).toHaveBeenCalledWith(summary);
 		expect(mockAutumnCheck).not.toHaveBeenCalled();
 		expect(mockAutumnTrack).not.toHaveBeenCalled();
@@ -249,7 +249,7 @@ describe("trackAgentUsageAndBill", () => {
 			requestLogger,
 			billingCustomerId: "owner:example-org",
 			billingAccess: { allowed: true, customerId: "owner:example-org" },
-			modelId: "openai/gpt-5.6-luna",
+			modelId: "claude-haiku-5-5",
 			source: "dashboard",
 			usage: { inputTokens: 1000, outputTokens: 100 },
 		});
@@ -294,7 +294,7 @@ it("self-hosted AI keeps provider setup and skips all hosted billing", async () 
 	process.env = {
 		...original,
 		SELFHOST: "true",
-		AI_GATEWAY_API_KEY: "synthetic-ai-key",
+		ANTHROPIC_API_KEY: "synthetic-ai-key",
 	};
 	try {
 		expect(
@@ -309,14 +309,14 @@ it("self-hosted AI keeps provider setup and skips all hosted billing", async () 
 		});
 		await trackAgentUsageAndBill({
 			billingCustomerId: "stale-customer",
-			modelId: "openai/gpt-5.6-luna",
+			modelId: "claude-haiku-5-5",
 			source: "dashboard",
 			usage: { inputTokens: 1000, outputTokens: 100 },
 		});
 		expect(mockAutumnCheck).not.toHaveBeenCalled();
 		expect(mockAutumnTrack).not.toHaveBeenCalled();
 		expect(mockGetBillingCustomerId).not.toHaveBeenCalled();
-		Reflect.deleteProperty(process.env, "AI_GATEWAY_API_KEY");
+		Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
 		await expect(getAgentBillingAccess(null)).rejects.toThrow("configure AI");
 	} finally {
 		process.env = original;

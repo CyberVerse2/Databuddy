@@ -67,7 +67,7 @@ function configFor(
 }
 
 describe("shared conversation execution", () => {
-	it("passes resolved OpenAI effort to the actual provider call without Anthropic cache hints", async () => {
+	it("passes resolved Claude effort and cache hints to the actual provider call", async () => {
 		const model = new MockLanguageModelV3({
 			modelId: modelNames.balanced,
 			doGenerate: answer(),
@@ -90,12 +90,11 @@ describe("shared conversation execution", () => {
 		).toBe("Synthetic answer.");
 		expect(model.doGenerateCalls).toHaveLength(1);
 		const call = model.doGenerateCalls[0];
-		expect(call?.providerOptions?.openai).toEqual({ reasoningEffort: "high" });
-		expect(call?.providerOptions?.anthropic).toBeUndefined();
+		expect(call?.providerOptions?.anthropic).toEqual({ effort: "high" });
 		expect(call?.temperature).toBeUndefined();
 		expect(
 			call?.prompt.some((message) => message.providerOptions?.anthropic)
-		).toBe(false);
+		).toBe(true);
 	});
 
 	it("retries a failed model continuation without repeating its completed mutation, preserving scope and callbacks", async () => {

@@ -21,7 +21,7 @@ import type { DatePreset } from "../lib/date-presets";
 import type { Filter } from "../query/types";
 
 const PRESERVED_ENV = new Set([
-	"AI_GATEWAY_API_KEY",
+	"ANTHROPIC_API_KEY",
 	"HOME",
 	"NODE_ENV",
 	"PATH",
@@ -45,7 +45,7 @@ type Surface = (typeof SURFACES)[number];
 type CaseKind = "injection" | "quality";
 type RunStatus = "fail" | "infra_error" | "pass";
 
-const DEFAULT_MODELS = ["openai/gpt-5.6-luna", "openai/gpt-6.1-sol"];
+const DEFAULT_MODELS = ["claude-haiku-5-5"];
 const DEFAULT_RUNS = 3;
 const MAX_RUNS = 10;
 const CONCURRENCY = 3;
@@ -56,8 +56,8 @@ const USAGE = [
 	`  cd /tmp && bun ${import.meta.path} --out <dir> [--runs ${DEFAULT_RUNS}] [--models ${DEFAULT_MODELS.join(",")}] [--surfaces ${SURFACES.join(",")}] [--cases <id,id>]`,
 	"",
 	"Run it from /tmp exactly as shown. Bun loads .env files from the working directory, and the repository .env points at production Postgres, Redis and ClickHouse.",
-	"Before any repository module loads, the runner deletes every environment variable except AI_GATEWAY_API_KEY, PATH, HOME, TMPDIR and NODE_ENV, points Postgres, Redis and ClickHouse at 127.0.0.1:1, and replaces every data and write tool with synthetic fixtures.",
-	"AI_GATEWAY_API_KEY must be set in the environment.",
+	"Before any repository module loads, the runner deletes every environment variable except ANTHROPIC_API_KEY, PATH, HOME, TMPDIR and NODE_ENV, points Postgres, Redis and ClickHouse at 127.0.0.1:1, and replaces every data and write tool with synthetic fixtures.",
+	"ANTHROPIC_API_KEY must be set in the environment.",
 ].join("\n");
 
 function exitWithUsage(problem: string): never {
@@ -117,7 +117,7 @@ function readCli(): CliOptions {
 	const models =
 		values.models === undefined ? DEFAULT_MODELS : listOption(values.models);
 	if (models.length === 0) {
-		return exitWithUsage("--models needs at least one gateway model id.");
+		return exitWithUsage("--models needs at least one model id.");
 	}
 	const envFiles = readdirSync(process.cwd()).filter(
 		(name) => name === ".env" || name.startsWith(".env.")
@@ -127,8 +127,8 @@ function readCli(): CliOptions {
 			`Refusing to run from ${process.cwd()} because it contains ${envFiles.join(", ")}.`
 		);
 	}
-	if (!process.env.AI_GATEWAY_API_KEY?.trim()) {
-		return exitWithUsage("AI_GATEWAY_API_KEY is not set.");
+	if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+		return exitWithUsage("ANTHROPIC_API_KEY is not set.");
 	}
 	return {
 		caseIds: values.cases === undefined ? null : listOption(values.cases),

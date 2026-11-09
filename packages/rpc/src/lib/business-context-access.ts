@@ -38,7 +38,7 @@ export async function businessContextGenerationAccess(
 	}
 	if (
 		!(
-			process.env.AI_GATEWAY_API_KEY?.trim() &&
+			process.env.ANTHROPIC_API_KEY?.trim() &&
 			process.env.CONTEXT_DEV_API_KEY?.trim()
 		)
 	) {

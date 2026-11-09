@@ -130,7 +130,7 @@ describe("agent credits at the native Autumn boundary", () => {
 		await trackAgentUsageAndBill({
 			billingCustomerId: customerId,
 			billingAccess,
-			modelId: "openai/gpt-5.6-luna",
+			modelId: "claude-haiku-5-5",
 			source: "dashboard",
 			usage,
 		});
@@ -196,7 +196,7 @@ describe("agent credits at the native Autumn boundary", () => {
 		await expect(
 			trackAgentUsageAndBill({
 				billingCustomerId: customerId,
-				modelId: "openai/gpt-5.6-luna",
+				modelId: "claude-haiku-5-5",
 				source: "mcp",
 				usage,
 			})
@@ -212,7 +212,7 @@ describe("agent credits at the native Autumn boundary", () => {
 			trackAgentUsageAndBill({
 				billingCustomerId: customerId,
 				billingAccess: { allowed: true, customerId: "another-customer" },
-				modelId: "openai/gpt-5.6-luna",
+				modelId: "claude-haiku-5-5",
 				source: "slack",
 				usage,
 			})

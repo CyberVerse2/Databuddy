@@ -13,15 +13,6 @@ const context = {
 };
 
 describe("native conversational model configuration", () => {
-	it("routes requested balanced reasoning to the selected provider", () => {
-		const config = createConfig({ ...context, thinking: "low" });
-		expect(config.model.modelId).toBe(modelNames.balanced);
-		expect(config.providerOptions).toEqual({
-			openai: { reasoningEffort: "low" },
-		});
-		expect(config.system.providerOptions).toBeUndefined();
-		expect(config.temperature).toBeUndefined();
-	});
 	it("gives dashboard and MCP the same defaults for the same model", () => {
 		for (const tier of ["quick", "balanced", "deep"] as const) {
 			const dashboard = createConfig(context, tier);
@@ -38,16 +29,5 @@ describe("native conversational model configuration", () => {
 			);
 			expect(dashboard.temperature).toBe(mcp.temperature);
 		}
-	});
-	it("does not inherit a tier's provider capabilities for an override", () => {
-		const config = createConfig(
-			{ ...context, thinking: "high" },
-			"balanced",
-			modelNames.quick
-		);
-		expect(config.model.modelId).toBe(modelNames.quick);
-		expect(config.providerOptions).toBeUndefined();
-		expect(config.system.providerOptions).toBeUndefined();
-		expect(config.temperature).toBe(0.1);
 	});
 });

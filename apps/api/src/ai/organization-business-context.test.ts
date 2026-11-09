@@ -33,7 +33,10 @@ vi.mock("@databuddy/services/organization-business-context", () => ({
 	readOrganizationBusinessContext: vi.fn(),
 	markBusinessContextGeneration: vi.fn(),
 }));
-vi.mock("@databuddy/ai/config/models", () => ({ createModelFromId: vi.fn() }));
+vi.mock("@databuddy/ai/config/models", () => ({
+	CLAUDE_MODEL_ID: "claude-haiku-5-5",
+	createModelFromId: vi.fn(),
+}));
 vi.mock("@databuddy/ai/tools/scrape-page", () => ({
 	readWebsitePage: vi.fn(),
 	discoverSitePaths: vi.fn(async () => ({
@@ -919,7 +922,7 @@ describe("organization business context request", () => {
 		expect(f.access).not.toHaveBeenCalled();
 		expect(f.bill).not.toHaveBeenCalled();
 		expect(usage).toHaveBeenCalledTimes(2);
-		expect(usage.mock.calls[0]?.[0].modelId).toBe("openai/gpt-5.6-luna");
+		expect(usage.mock.calls[0]?.[0].modelId).toBe("claude-haiku-5-5");
 	});
 
 	it("generates only a draft using inspected sources and separate saved context", async () => {
@@ -982,7 +985,7 @@ describe("organization business context request", () => {
 		expect(
 			f.bill.mock.calls.every(
 				([call]) =>
-					call.modelId === "openai/gpt-5.6-luna" &&
+					call.modelId === "claude-haiku-5-5" &&
 					call.organizationId === "example-org"
 			)
 		).toBe(true);

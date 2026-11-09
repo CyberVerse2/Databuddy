@@ -5,7 +5,10 @@ import {
 	trackAgentUsage,
 	trackAgentUsageAndBill,
 } from "@databuddy/ai/agents/execution";
-import { createModelFromId } from "@databuddy/ai/config/models";
+import {
+	CLAUDE_MODEL_ID,
+	createModelFromId,
+} from "@databuddy/ai/config/models";
 import { getAILogger } from "@databuddy/ai/lib/ai-logger";
 import {
 	BUSINESS_BRIEF_INSTRUCTIONS,
@@ -41,7 +44,7 @@ import { z } from "zod";
 import { createLogger, log } from "evlog";
 
 const WWW = /^www\./;
-const MODEL = "openai/gpt-5.6-luna";
+const MODEL = CLAUDE_MODEL_ID;
 const CANDIDATE_LIMIT = 80;
 const EVENT_NAME = /^[a-z][a-z0-9_]{2,63}$/;
 const PATH_PRIORITY: [RegExp, number][] = [

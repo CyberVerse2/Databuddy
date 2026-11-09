@@ -19,7 +19,6 @@ interface Captured {
 	body: {
 		segments?: { source: string }[];
 		state?: { segments: { source: string }[] };
-		providerOptions?: { gateway: { zeroDataRetention: boolean } };
 	};
 	headers: Record<string, string>;
 	mode: string;
@@ -67,13 +66,7 @@ function git(cwd: string, ...args: string[]) {
 }
 function cli(
 	args: string[],
-	{
-		mode = "forbid",
-		key = "synthetic-key-no-network",
-		cache = "cache",
-		status = 0,
-		runtime = "node",
-	} = {}
+	{ mode = "forbid", cache = "cache", status = 0, runtime = "node" } = {}
 ) {
 	const result = spawnSync(
 		runtime,
@@ -89,7 +82,6 @@ function cli(
 				XDG_CACHE_HOME: join(temporary, cache),
 				SCAN_TEST_MODE: mode,
 				SCAN_TEST_CAPTURE: capture,
-				...(key ? { AI_GATEWAY_API_KEY: key } : {}),
 			},
 		}
 	);
@@ -207,14 +199,14 @@ test("the dry-run payload never carries secrets, env files, symlinked code or ot
 	]);
 });
 
-test("a scan classifies through the chosen destination, reuses its cache and stops cleanly", async () => {
+test("a scan classifies through the scan API, reuses its cache and stops cleanly", async () => {
 	const hosted = JSON.parse(
-		cli([repo, "--json"], { mode: "valid", key: "", cache: "hosted" }).stdout
+		cli([repo, "--json"], { mode: "valid", cache: "hosted" }).stdout
 	) as { summary: Summary; rows: { priority: number }[] };
 	assert.equal(hosted.summary.classifiedFiles, 3);
 	assert.ok(hosted.rows.some((row) => row.priority < 0.7));
 	assert.match(
-		cli([repo], { key: "", cache: "hosted" }).stdout,
+		cli([repo], { cache: "hosted" }).stdout,
 		/\d+ low-priority not shown/
 	);
 	for (const request of await requests()) {
@@ -228,22 +220,15 @@ test("a scan classifies through the chosen destination, reuses its cache and sto
 	}
 
 	const before = (await requests()).length;
-	const direct = JSON.parse(
+	const retried = JSON.parse(
 		cli([repo, "--json"], { mode: "retry-once", runtime: "bun" }).stdout
 	) as { summary: Summary };
-	assert.equal(direct.summary.classifiedFiles, 3);
+	assert.equal(retried.summary.classifiedFiles, 3);
 	const sent = (await requests()).slice(before);
-	assert.equal(direct.summary.requestAttempts, sent.length);
+	assert.equal(retried.summary.requestAttempts, sent.length);
 	for (const request of sent) {
-		assert.equal(
-			request.url,
-			"https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
-		);
-		assert.equal(
-			request.headers.Authorization,
-			"Bearer synthetic-key-no-network"
-		);
-		assert.equal(request.body.providerOptions?.gateway.zeroDataRetention, true);
+		assert.match(request.url, /\/public\/v1\/scan\/evaluate$/);
+		assert.equal(request.headers.Authorization, undefined);
 	}
 	const cacheRoot = join(temporary, "cache/databuddy/scan");
 	const [runDir = ""] = await readdir(cacheRoot);
@@ -251,11 +236,7 @@ test("a scan classifies through the chosen destination, reuses its cache and sto
 		join(cacheRoot, runDir, "progress.ndjson"),
 		"utf8"
 	);
-	for (const secret of [
-		markers.source,
-		"synthetic-key-no-network",
-		"DO_NOT_LOG_PROVIDER_BODY",
-	]) {
+	for (const secret of [markers.source, "DO_NOT_LOG_PROVIDER_BODY"]) {
 		assert.ok(!log.includes(secret), `Progress log leaked ${secret}`);
 	}
 
@@ -270,7 +251,6 @@ test("a scan classifies through the chosen destination, reuses its cache and sto
 		env: {
 			PATH: process.env.PATH,
 			XDG_CACHE_HOME: join(temporary, "interrupted"),
-			AI_GATEWAY_API_KEY: "synthetic-key-no-network",
 			SCAN_TEST_MODE: "interrupt",
 			SCAN_TEST_CAPTURE: capture,
 		},

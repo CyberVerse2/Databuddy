@@ -412,7 +412,7 @@ integration("included saved-evidence replies", () => {
 				expect(input.history.at(-1)?.assistantText).toBe("Answer 13");
 				return {
 					text: "180 eligible visitors did not complete, calculated from 200 entrants minus 20 completions.",
-					modelId: "openai/gpt-5.6-luna",
+					modelId: "claude-haiku-5-5",
 					usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
 				};
 			}
@@ -451,7 +451,7 @@ integration("included saved-evidence replies", () => {
 				expect(input.snapshot).toBeNull();
 				return {
 					text: "Raw evidence was not retained.",
-					modelId: "openai/gpt-5.6-luna",
+					modelId: "claude-haiku-5-5",
 					usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
 				};
 			}
@@ -735,7 +735,7 @@ integration("included saved-evidence replies", () => {
 		expect(model).toHaveBeenCalledTimes(1);
 		expect(usage).toHaveBeenCalledTimes(1);
 		expect(usage.mock.calls[0]?.[0]).toMatchObject({
-			modelId: "typesafe-ai/jev",
+			modelId: "claude-haiku-5-5",
 			usage: { totalTokens: 103 },
 			organizationId: f.organizationId,
 			websiteId: f.websiteId,

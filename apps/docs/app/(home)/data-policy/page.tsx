@@ -315,8 +315,7 @@ export default function DataPolicyPage() {
 							<div className="py-3">
 								<dt className="font-semibold">Vercel</dt>
 								<dd className="text-muted-foreground">
-									Website and dashboard hosting; AI Gateway routes AI requests
-									to configured model providers.
+									Website and dashboard hosting.
 								</dd>
 							</div>
 							<div className="py-3">

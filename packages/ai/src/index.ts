@@ -39,7 +39,7 @@ export {
 	AI_MODEL_MAX_RETRIES,
 	ANTHROPIC_CACHE_1H,
 	createModelFromId,
-	isAiGatewayConfigured,
+	isAiConfigured,
 	modelNames,
 	models,
 	type AgentModelKey,

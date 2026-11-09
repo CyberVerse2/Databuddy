@@ -116,7 +116,7 @@ const apply = createProcedureClient(insightsRouter.applyAction, { context });
 const originalEnv = process.env;
 
 beforeEach(() => {
-	process.env = { ...originalEnv, SELFHOST: "true", AI_GATEWAY_API_KEY: "" };
+	process.env = { ...originalEnv, SELFHOST: "true", ANTHROPIC_API_KEY: "" };
 	authorize.mockClear();
 	transaction.mockClear();
 	enqueue.mockClear();
@@ -167,9 +167,9 @@ for (const [name, reply] of [
 		"  ",
 	])(`${name} rejects AI credentials %p before writes and queues`, async (key) => {
 		if (key === undefined) {
-			Reflect.deleteProperty(process.env, "AI_GATEWAY_API_KEY");
+			Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
 		} else {
-			process.env.AI_GATEWAY_API_KEY = key;
+			process.env.ANTHROPIC_API_KEY = key;
 		}
 		await expect(reply()).rejects.toMatchObject({
 			code: "BAD_REQUEST",
@@ -197,7 +197,7 @@ for (const [name, reply] of [
 		process.env.SELFHOST = "false";
 		await expect(reply()).rejects.toThrow("Reached transaction");
 		process.env.SELFHOST = "true";
-		process.env.AI_GATEWAY_API_KEY = "synthetic-key";
+		process.env.ANTHROPIC_API_KEY = "synthetic-key";
 		await expect(reply()).rejects.toThrow("Reached transaction");
 		expect(transaction).toHaveBeenCalledTimes(2);
 	});

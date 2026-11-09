@@ -28,8 +28,6 @@ interface SelectionResult {
 	selectionUsage: unknown[];
 }
 
-// Frozen synthetic measurements and native selection/investigation entry points.
-// Only gateway model requests are live. No persistence, billing or delivery runs.
 const asOf = "2026-09-05T00:00:00.000Z";
 const modelId = INSIGHTS_MODEL_ID;
 const input = {

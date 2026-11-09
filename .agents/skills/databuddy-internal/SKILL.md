@@ -31,7 +31,7 @@ Keep additions **minimal**: one bullet, a new `rg` hint, or a routing note—eno
 - Dashboard Playwright webServer commands run under CI PATH from setup-bun; avoid `bash -lc` because login shells can drop Bun from PATH. Build dist-only workspace packages such as `@databuddy/sdk` and `@databuddy/devtools` before starting the API/dashboard. Client `NEXT_PUBLIC_*` flags must use direct env access so Next can inline them. `readBooleanEnv` only treats the literal string `"true"` as enabled, so CI E2E booleans must use `"true"`/`"false"`, not `"1"`/`"0"`.
 - Dashboard pages that call `useSearchParams()` must keep that call inside a Suspense-rendered child; run the production dashboard build after adding URL-driven onboarding state.
 - Business context loads through `OrganizationProvider` before its page query and generation-access check; keep all three states on the same page/card geometry and test their transitions with delayed requests on desktop and mobile.
-- Business-context generation runs in the API; verify `AI_GATEWAY_API_KEY`, `CONTEXT_DEV_API_KEY`, and hosted `AUTUMN_SECRET_KEY` on the serving API deployment. Worker credentials and a green `/health` do not establish feature readiness.
+- Business-context generation runs in the API; verify `ANTHROPIC_API_KEY`, `CONTEXT_DEV_API_KEY`, and hosted `AUTUMN_SECRET_KEY` on the serving API deployment. Worker credentials and a green `/health` do not establish feature readiness.
 - Failed business-context generations survive refresh; dismiss them through the existing generation-ID-scoped cancel mutation while preserving unsaved editor drafts. Hiding the message in component state is not durable.
 - Playwright launched through Bun still uses the Node on PATH. CI installs Node 24; local Node 20 lacks `Promise.withResolvers`, so keep deferred E2E requests on portable Promise constructors.
 - The local `.env` sets `NODE_ENV=development`; override it with `NODE_ENV=production` when verifying `next build`, or root-error prerender behavior can produce a misleading local failure.
@@ -264,7 +264,7 @@ Read [codebase-map.md](./references/codebase-map.md) when you need deeper routin
 ## Pitfalls
 
 - The `:online` model suffix is a **Perplexity-only** convention (e.g. `perplexity/sonar-pro`). Never add `:online` to non-Perplexity models.
-- **Vercel AI Gateway** model IDs in `apps/api/src/ai/config/models.ts` use gateway-style names (e.g. `anthropic/claude-sonnet-4.5`), not OpenRouter catalog strings.
+- Model IDs in `apps/api/src/ai/config/models.ts` are Anthropic model names (e.g. `claude-haiku-5-5`), not OpenRouter catalog strings.
 - **Bun HTTP** default `idleTimeout` is **10 seconds**; agent streams can look idle during slow tools. `apps/api/src/index.ts` exports `idleTimeout` on the server (Bun caps at **255** seconds).
 - **AI SDK UI (`useChat`)** does not document automatic HTTP retries on `DefaultChatTransport`—retry UX is **`regenerate()`** + `error` ([chatbot error state](https://ai-sdk.dev/docs/ai-sdk-ui/chatbot#error-state), [error handling](https://ai-sdk.dev/docs/ai-sdk-ui/error-handling)). `maxRetries` on **`streamText`/`generateText`** is server-side model calls, not the browser chat `fetch`. Mid-stream disconnect: **`resumeStream()`** ([useChat](https://ai-sdk.dev/docs/reference/ai-sdk-ui/use-chat)).
 - AI SDK UI stream custom chunks must use `type: "data-*"` (for example `data-usage` or `data-aiComponent`); injecting arbitrary chunk types such as `usage` makes `DefaultChatTransport` reject the stream.

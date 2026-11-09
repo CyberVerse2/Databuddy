@@ -1,9 +1,42 @@
 import "@databuddy/test/env";
-import type { JsonValue, Segment } from "@databuddy/scan/src/evaluate";
 import { Elysia } from "elysia";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const state = vi.hoisted(() => ({ degraded: false, rateLimited: false }));
+const state = vi.hoisted(() => ({
+	available: true,
+	degraded: false,
+	failing: false,
+	modelRequests: [] as {
+		questions: Record<string, unknown>;
+		state: { segments: { path: string }[] };
+	}[],
+	rateLimited: false,
+}));
+
+vi.mock("@databuddy/ai/evaluation", () => ({
+	isEvaluationAvailable: () => state.available,
+	evaluateQuestions: async (body: (typeof state.modelRequests)[number]) => {
+		state.modelRequests.push(body);
+		if (state.failing) {
+			throw new Error("Synthetic model failure");
+		}
+		const answers: Record<string, unknown> = {};
+		for (const [index] of body.state.segments.entries()) {
+			answers[`coverage_${index}`] = {
+				type: "choice",
+				choice: "missing",
+				probabilities: { missing: 0.9 },
+			};
+			answers[`category_${index}`] = { type: "choice", choice: "revenue" };
+			answers[`priority_${index}`] = { type: "score", score: 2 };
+		}
+		return {
+			answers,
+			modelId: "claude-haiku-5-5",
+			usage: { inputTokens: 3, outputTokens: 1 },
+		};
+	},
+}));
 
 vi.mock("@databuddy/redis/rate-limit", () => ({
 	getRateLimitHeaders: () => ({ "x-ratelimit-remaining": "0" }),
@@ -35,13 +68,6 @@ const segment = {
 		"export function Plan() { return <button onClick={() => save.mutate()}>Save</button>; }",
 };
 
-interface GatewayBody {
-	questions: Record<string, JsonValue>;
-	state: { segments: Segment[] };
-}
-let gatewayBodies: GatewayBody[] = [];
-let gatewayStatus = 200;
-
 function request(body: string, headers: Record<string, string> = {}) {
 	return app.handle(
 		new Request("http://localhost/v1/scan/evaluate", {
@@ -55,35 +81,9 @@ function request(body: string, headers: Record<string, string> = {}) {
 beforeEach(() => {
 	state.degraded = false;
 	state.rateLimited = false;
-	gatewayBodies = [];
-	gatewayStatus = 200;
-	vi.stubEnv("AI_GATEWAY_API_KEY", "gateway-key");
-	vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
-		const body = JSON.parse(String(init.body)) as GatewayBody;
-		gatewayBodies.push(body);
-		if (gatewayStatus !== 200) {
-			return new Response(null, { status: gatewayStatus });
-		}
-		const answers: Record<string, JsonValue> = {};
-		for (const [index] of body.state.segments.entries()) {
-			answers[`coverage_${index}`] = {
-				choice: "missing",
-				probabilities: { missing: 0.9 },
-				reasoning: "free-form model text",
-			};
-			answers[`category_${index}`] = { choice: "revenue" };
-			answers[`priority_${index}`] = { score: 2 };
-		}
-		return Response.json({
-			answers,
-			usage: { inputTokens: 3, outputTokens: 1 },
-		});
-	});
-});
-
-afterEach(() => {
-	vi.unstubAllEnvs();
-	vi.unstubAllGlobals();
+	state.available = true;
+	state.failing = false;
+	state.modelRequests = [];
 });
 
 describe("public scan endpoint", () => {
@@ -103,12 +103,14 @@ describe("public scan endpoint", () => {
 			coverage_0: { choice: "missing", probabilities: { missing: 0.9 } },
 			priority_0: { score: 2 },
 		});
-		expect(Object.keys(gatewayBodies[0]?.questions ?? {})).toEqual([
+		expect(Object.keys(state.modelRequests[0]?.questions ?? {})).toEqual([
 			"coverage_0",
 			"category_0",
 			"priority_0",
 		]);
-		expect(JSON.stringify(gatewayBodies[0])).not.toContain("Write a poem");
+		expect(JSON.stringify(state.modelRequests[0])).not.toContain(
+			"Write a poem"
+		);
 	});
 
 	it("rejects malformed and out-of-bounds requests before calling the model", async () => {
@@ -133,7 +135,7 @@ describe("public scan endpoint", () => {
 				)
 			).status
 		).toBe(413);
-		expect(gatewayBodies).toHaveLength(0);
+		expect(state.modelRequests).toHaveLength(0);
 	});
 
 	it("rate limits per caller", async () => {
@@ -144,7 +146,7 @@ describe("public scan endpoint", () => {
 
 		expect(response.status).toBe(429);
 		expect(response.headers.get("x-ratelimit-remaining")).toBe("0");
-		expect(gatewayBodies).toHaveLength(0);
+		expect(state.modelRequests).toHaveLength(0);
 	});
 
 	it("fails closed when the rate limiter cannot reach Redis", async () => {
@@ -154,20 +156,20 @@ describe("public scan endpoint", () => {
 		);
 
 		expect(response.status).toBe(503);
-		expect(gatewayBodies).toHaveLength(0);
+		expect(state.modelRequests).toHaveLength(0);
 	});
 
-	it("reports gateway failure and missing configuration as retryable", async () => {
-		gatewayStatus = 503;
+	it("reports model failure and missing configuration as retryable", async () => {
+		state.failing = true;
 		expect(
 			(await request(JSON.stringify({ catalog, segments: [segment] }))).status
 		).toBe(503);
-		expect(gatewayBodies).toHaveLength(2);
+		expect(state.modelRequests).toHaveLength(1);
 
-		vi.stubEnv("AI_GATEWAY_API_KEY", "");
+		state.available = false;
 		expect(
 			(await request(JSON.stringify({ catalog, segments: [segment] }))).status
 		).toBe(503);
-		expect(gatewayBodies).toHaveLength(2);
+		expect(state.modelRequests).toHaveLength(1);
 	});
 });

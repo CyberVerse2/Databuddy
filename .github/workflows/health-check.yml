@@ -675,7 +675,7 @@ jobs:
             -e INSIGHTS_WORKER_CONCURRENCY=1 \
             -e INSIGHTS_WORKER_ENABLED=true \
             -e BETTER_AUTH_SECRET=test-better-auth-secret-for-health-checks \
-            -e AI_GATEWAY_API_KEY=test-ai-gateway-key \
+            -e ANTHROPIC_API_KEY=test-anthropic-key \
             insights:test
 
           echo "Waiting for Insights to start..."

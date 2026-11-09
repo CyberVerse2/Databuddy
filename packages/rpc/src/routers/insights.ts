@@ -112,7 +112,7 @@ const appendInvestigationReplyInputSchema = z
 type InsightTimelineItem = z.infer<typeof insightTimelineItemSchema>;
 
 const investigationAIMissing = () =>
-	readBooleanEnv("SELFHOST") && !process.env.AI_GATEWAY_API_KEY?.trim();
+	readBooleanEnv("SELFHOST") && !process.env.ANTHROPIC_API_KEY?.trim();
 
 function requireInvestigationAI() {
 	if (investigationAIMissing()) {

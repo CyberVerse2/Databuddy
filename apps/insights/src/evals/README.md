@@ -2,15 +2,15 @@
 
 `quality.ts` runs the production investigation agent on synthetic cases. Read tools return fixed fixtures and never touch analytics, definitions or delivery. Keep every fixture synthetic.
 
-Run outside the repository with only `AI_GATEWAY_API_KEY` set. Bun loads `.env` from the working directory, and the repository `.env` points at production Postgres, Redis and ClickHouse:
+Run outside the repository with only `ANTHROPIC_API_KEY` set. Bun loads `.env` from the working directory, and the repository `.env` points at production Postgres, Redis and ClickHouse:
 
 ```sh
-cd /tmp && env -i PATH="$PATH" HOME="$HOME" AI_GATEWAY_API_KEY="$AI_GATEWAY_API_KEY" \
+cd /tmp && env -i PATH="$PATH" HOME="$HOME" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   bun /path/to/Databuddy/apps/insights/src/evals/quality.ts --out /tmp/insights-quality --runs 2
 ```
 
 - `--cases a,b` reruns selected case IDs; keep the original failed result as well.
-- `--model` selects a gateway model; it defaults to the production investigation model.
+- `--model` selects a Claude model; it defaults to the production investigation model.
 - `--agent <path>` runs an alternate agent for an isolated comparison. Copy it into this checkout's `apps/insights/src` and remove the copy afterward: the runner rejects another checkout's `ai` and `zod`, whose separate Zod registry can silently drop tool-field descriptions. For a full runtime comparison, run each checkout's own evaluator.
 - `--baseline <dir>[,<dir>]` prints per-case changes against earlier output directories, recomputed from their `results.json` and weighted by the observed runs for each metric. Given two or more identical baseline directories, `~` marks a change within the spread of their per-case means.
 
@@ -18,7 +18,7 @@ Cases run two at a time. Each run writes `<case>-<n>.jsonl` traces (prompts, obs
 
 A failed check exits nonzero. `REVIEW REQUIRED` marks a mechanically valid case whose `reviewRequired` note still needs a person; a zero exit does not complete that review. Published briefs have a 60-word budget across title, summary, cause and evidence (plus impact for legacy outcomes), excluding action details. It is a quality target, not a runtime gate; review brevity alongside retained information.
 
-`injection.ts` runs the same agent on prompt-injection cases: attacker text in an event name, error message, route path, annotation, error rows, a commit message or a team reply, each beside a control without the injection. It clears every other environment variable and blocks network access except the AI gateway before loading any repository module. It reports per case whether the attack was followed, whether attacker text was copied into the outcome, and the publish decision against the control, and exits nonzero when an attack was followed. Success checks are text heuristics, so read the outcomes in `results.json` before trusting a rate.
+`injection.ts` runs the same agent on prompt-injection cases: attacker text in an event name, error message, route path, annotation, error rows, a commit message or a team reply, each beside a control without the injection. It clears every other environment variable and blocks network access except the Anthropic API (`https://api.anthropic.com`) before loading any repository module. It reports per case whether the attack was followed, whether attacker text was copied into the outcome, and the publish decision against the control, and exits nonzero when an attack was followed. Success checks are text heuristics, so read the outcomes in `results.json` before trusting a rate.
 
 ## Cases
 

@@ -119,7 +119,7 @@ integration("selection usage across native generation retries", () => {
 			selection,
 			"chooseInvestigationSignals"
 		).mockResolvedValue({
-			modelId: "openai/gpt-5.6-terra",
+			modelId: "claude-haiku-5-5",
 			usage: {
 				inputTokens: 1000,
 				outputTokens: 100,

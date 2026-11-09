@@ -1,4 +1,7 @@
-import { isAiGatewayConfigured } from "@databuddy/ai/config/models";
+import {
+	evaluateQuestions,
+	isEvaluationAvailable,
+} from "@databuddy/ai/evaluation";
 import {
 	type BusinessContext,
 	prioritizeBusinessContext,
@@ -6,10 +9,7 @@ import {
 import { businessContextRelevanceInstructions } from "@databuddy/ai/prompts/investigation";
 import type { LanguageModelUsage } from "ai";
 import { z } from "zod";
-import { evaluateWithJev } from "./business-aware-selection";
 import { emitInsightsEvent } from "./lib/evlog-insights";
-
-const modelId = "typesafe-ai/jev";
 
 interface RankingInput {
 	abortSignal?: AbortSignal;
@@ -26,12 +26,15 @@ interface RankingInput {
 /** One optional ranking call; no generated content enters the investigation. */
 export function rankInvestigationBusinessContext(
 	input: RankingInput,
-	evaluate?: typeof evaluateWithJev
+	evaluate?: typeof evaluateQuestions
 ): Promise<BusinessContext> {
 	return prioritizeBusinessContext(
 		input.contexts,
 		async ({ baseline, pages }) => {
-			if (!(evaluate || isAiGatewayConfigured) || input.abortSignal?.aborted) {
+			if (
+				!(evaluate || isEvaluationAvailable()) ||
+				input.abortSignal?.aborted
+			) {
 				return null;
 			}
 			const questions = Object.fromEntries(
@@ -73,21 +76,20 @@ export function rankInvestigationBusinessContext(
 				if (input.canRun && !(await input.canRun())) {
 					return null;
 				}
-				const deadline = AbortSignal.timeout(1000);
+				const deadline = AbortSignal.timeout(10_000);
 				const abortSignal = input.abortSignal
 					? AbortSignal.any([input.abortSignal, deadline])
 					: deadline;
 				abortSignal.throwIfAborted();
-				const result = await (evaluate ?? evaluateWithJev)({
+				const result = await (evaluate ?? evaluateQuestions)({
 					state,
 					questions,
 					abortSignal,
-					providerOptions: { gateway: { zeroDataRetention: true } },
 				});
 				const completedInTime = !abortSignal.aborted;
 				// Account for returned usage even if answers are late or malformed.
 				await input.onUsage?.({
-					modelId,
+					modelId: result.modelId,
 					usage: {
 						inputTokens: result.usage?.inputTokens,
 						outputTokens: result.usage?.outputTokens,

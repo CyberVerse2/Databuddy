@@ -9,6 +9,7 @@ import dayjs from "dayjs";
 import { z } from "zod";
 import {
 	AI_MODEL_MAX_RETRIES,
+	CLAUDE_MODEL_ID,
 	createModelFromId,
 	isAiConfigured,
 } from "@databuddy/ai/config/models";
@@ -72,7 +73,7 @@ const MAX_STEPS = 8;
 const TIMEOUT_MS = 2 * 60_000;
 const MAX_FINISH_ATTEMPTS = 3;
 const SNAKE_CASE_WORD = /\b[a-z0-9]+(?:_[a-z0-9]+)+\b/gi;
-export const INSIGHTS_MODEL_ID = "openai/gpt-6.1-sol";
+export const INSIGHTS_MODEL_ID = CLAUDE_MODEL_ID;
 const INSIGHTS_MODEL = createModelFromId(INSIGHTS_MODEL_ID);
 
 const revenueFields = (
@@ -2764,7 +2765,7 @@ export async function runInsightAgent(
 			}
 		: originalInput;
 	if (!(options.model || isAiConfigured)) {
-		throw new Error("AI_GATEWAY_API_KEY or ANTHROPIC_API_KEY is required");
+		throw new Error("ANTHROPIC_API_KEY is required");
 	}
 	const isDefinition = ["goal", "funnel"].includes(input.signal.entity.type);
 	const isError =

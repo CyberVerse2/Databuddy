@@ -128,9 +128,7 @@ async function startRuntime() {
 	});
 	if (workerEnabled) {
 		if (!isAiConfigured) {
-			throw new Error(
-				"INSIGHTS_WORKER_ENABLED requires AI_GATEWAY_API_KEY or ANTHROPIC_API_KEY"
-			);
+			throw new Error("INSIGHTS_WORKER_ENABLED requires ANTHROPIC_API_KEY");
 		}
 		const configuredConcurrency = Number.parseInt(
 			process.env.INSIGHTS_WORKER_CONCURRENCY ?? "",

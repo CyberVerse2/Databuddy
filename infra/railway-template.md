@@ -54,7 +54,7 @@ NODE_ENV=production
 SELFHOST=true
 BETTER_AUTH_SECRET=${{secret(64)}}
 DATABUDDY_ENCRYPTION_KEY=${{secret(64)}}
-AI_GATEWAY_API_KEY=<your Vercel AI Gateway key>
+ANTHROPIC_API_KEY=<your Anthropic API key>
 ```
 
 ### Dashboard
@@ -114,7 +114,7 @@ MCP_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
 # Seed testing only when building API from repo:
 # RAILWAY_DOCKERFILE_PATH=api.Dockerfile
 BASKET_URL=https://${{Events.RAILWAY_PUBLIC_DOMAIN}}
-AI_GATEWAY_API_KEY=${{shared.AI_GATEWAY_API_KEY}}
+ANTHROPIC_API_KEY=${{shared.ANTHROPIC_API_KEY}}
 EMAIL_FROM=Databuddy <no-reply@example.com>
 ALERTS_EMAIL_FROM=Databuddy <alerts@example.com>
 ```
@@ -141,7 +141,7 @@ CLICKHOUSE_URL=${{ClickHouse.DATABASE_URL}}
 DASHBOARD_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_SECRET=${{shared.BETTER_AUTH_SECRET}}
 DATABUDDY_ENCRYPTION_KEY=${{shared.DATABUDDY_ENCRYPTION_KEY}}
-AI_GATEWAY_API_KEY=${{shared.AI_GATEWAY_API_KEY}}
+ANTHROPIC_API_KEY=${{shared.ANTHROPIC_API_KEY}}
 RESEND_API_KEY=${{API.RESEND_API_KEY}}
 EMAIL_FROM=${{API.EMAIL_FROM}}
 API_URL=https://${{API.RAILWAY_PUBLIC_DOMAIN}}

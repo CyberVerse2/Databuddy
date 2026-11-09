@@ -46,57 +46,6 @@ interface InvestigationSelectionInput {
 	limit: number;
 }
 
-const JEV_ENDPOINT = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model";
-
-const jevResponseSchema = z.object({
-	answers: z.record(z.string(), z.unknown()),
-	usage: z
-		.object({
-			inputTokens: z.number().optional(),
-			outputTokens: z.number().optional(),
-		})
-		.optional(),
-});
-
-interface JevRequest {
-	abortSignal: AbortSignal;
-	providerOptions?: { gateway: { zeroDataRetention: boolean } };
-	questions: Record<
-		string,
-		{
-			type: "boolean";
-			instructions: string;
-			criteria?: { true: string; false: string };
-		}
-	>;
-	state: unknown;
-}
-
-export async function evaluateWithJev({ abortSignal, ...body }: JevRequest) {
-	const apiKey = (process.env.AI_GATEWAY_API_KEY ?? "").trim();
-	if (!apiKey) {
-		throw new Error("AI_GATEWAY_API_KEY is not configured");
-	}
-	const response = await fetch(JEV_ENDPOINT, {
-		method: "POST",
-		signal: abortSignal,
-		headers: {
-			authorization: `Bearer ${apiKey}`,
-			"content-type": "application/json",
-			"ai-evaluation-model-specification-version": "4",
-			"ai-gateway-auth-method": "api-key",
-			"ai-gateway-protocol-version": "0.0.1",
-			"ai-model-id": "typesafe-ai/jev",
-		},
-		body: JSON.stringify(body),
-	});
-	if (!response.ok) {
-		throw new Error(`Jev evaluation failed with HTTP ${response.status}`);
-	}
-	return jevResponseSchema.parse(await response.json());
-}
-
-/** One tool-free choice using the existing investigation model and gateway. */
 export async function chooseInvestigationSignals(
 	input: InvestigationSelectionInput,
 	model?: LanguageModel

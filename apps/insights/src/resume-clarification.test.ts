@@ -137,7 +137,7 @@ it("resumes an anchored clarification without refresh, business reads, investiga
 		expect(input.history[0].assistantText).toBe("Saved answer 11");
 		return {
 			text: "This explains the original saved result.",
-			modelId: "openai/gpt-5.6-luna",
+			modelId: "claude-haiku-5-5",
 			usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
 		};
 	});
@@ -181,7 +181,7 @@ it("skips delivery when the reply left running while the clarification was gener
 	});
 	const clarify = mock(async () => ({
 		text: "Generated after the reply moved on.",
-		modelId: "openai/gpt-5.6-luna",
+		modelId: "claude-haiku-5-5",
 		usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
 	}));
 	const result = await resumeInsightReply(

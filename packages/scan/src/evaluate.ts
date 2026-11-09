@@ -33,7 +33,6 @@ export interface Attempt {
 	status: number | null;
 }
 export interface EvaluationOptions {
-	apiKey?: string;
 	attempts?: number;
 	onAttempt: (attempt: Attempt) => void;
 	onRetry: (retry: { attempt: number; reason: string; waitMs: number }) => void;
@@ -220,7 +219,6 @@ export function createRequest(jobs: Segment[], catalog: Catalog): string {
 			segments: jobs,
 		},
 		questions,
-		providerOptions: { gateway: { zeroDataRetention: true } },
 	});
 }
 
@@ -298,7 +296,6 @@ function retryAfterMs(value: string) {
 	return Number.isFinite(duration) ? Math.max(0, duration) : Number.NaN;
 }
 
-const gatewayUrl = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model";
 export const hostedScanUrl =
 	process.env.DATABUDDY_SCAN_URL ??
 	"https://api.databuddy.cc/public/v1/scan/evaluate";
@@ -308,25 +305,16 @@ export async function requestEvaluation(
 	options: EvaluationOptions
 ): Promise<JsonValue> {
 	const attempts = options.attempts ?? maxAttempts;
-	const direct = Boolean(options.apiKey);
-	const { state } = direct ? { state: null } : JSON.parse(body);
-	const payload = direct
-		? body
-		: JSON.stringify({ segments: state.segments, catalog: state.catalog });
-	const headers: Record<string, string> = direct
-		? {
-				Authorization: `Bearer ${options.apiKey}`,
-				"Content-Type": "application/json",
-				"ai-gateway-protocol-version": "0.0.1",
-				"ai-gateway-auth-method": "api-key",
-				"ai-evaluation-model-specification-version": "4",
-				"ai-model-id": "typesafe-ai/jev",
-			}
-		: {
-				"Content-Type": "application/json",
-				"x-databuddy-scan-version": version,
-				...(options.run ? { "x-databuddy-scan-run": options.run } : {}),
-			};
+	const { state } = JSON.parse(body);
+	const payload = JSON.stringify({
+		segments: state.segments,
+		catalog: state.catalog,
+	});
+	const headers: Record<string, string> = {
+		"Content-Type": "application/json",
+		"x-databuddy-scan-version": version,
+		...(options.run ? { "x-databuddy-scan-run": options.run } : {}),
+	};
 	for (let attempt = 1; attempt <= attempts; attempt++) {
 		options.signal.throwIfAborted();
 		const started = performance.now();
@@ -335,19 +323,16 @@ export async function requestEvaluation(
 		let providerCode: string | undefined;
 		let requestId = "";
 		try {
-			response = await fetch(direct ? gatewayUrl : hostedScanUrl, {
+			response = await fetch(hostedScanUrl, {
 				method: "POST",
 				body: payload,
 				headers,
 				signal: AbortSignal.any([timeout, options.signal]),
 			});
-			requestId = safeRequestId.parse(
-				response.headers.get("x-vercel-id") ??
-					response.headers.get("x-request-id")
-			);
+			requestId = safeRequestId.parse(response.headers.get("x-request-id"));
 			if (!response.ok) {
 				providerCode = await providerErrorCode(response);
-				throw new Error(`Gateway HTTP ${response.status}`);
+				throw new Error(`Scan HTTP ${response.status}`);
 			}
 			const result = (await response.json()) as JsonValue;
 			options.onAttempt({
@@ -412,5 +397,5 @@ export async function requestEvaluation(
 			}
 		}
 	}
-	throw new Error("Gateway attempts exhausted");
+	throw new Error("Scan attempts exhausted");
 }

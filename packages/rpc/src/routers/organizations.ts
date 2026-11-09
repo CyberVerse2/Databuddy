@@ -481,7 +481,7 @@ export const organizationsRouter = {
 					isOrganization: Boolean(context.organizationId),
 					canUserUpgrade: false,
 					hasActiveSubscription: false,
-					aiConfigured: Boolean(process.env.AI_GATEWAY_API_KEY?.trim()),
+					aiConfigured: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
 				};
 			}
 

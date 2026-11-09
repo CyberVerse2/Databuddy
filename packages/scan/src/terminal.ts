@@ -23,7 +23,7 @@ const areas = {
 	retention: "Engagement",
 	acquisition: "Acquisition",
 };
-export const privacy = `Code is sent to Databuddy's scan API (${new URL(hostedScanUrl).host}), which classifies it with the Jev model (typesafe-ai/jev) on Vercel AI Gateway under zero data retention: your source is never stored or logged. Only the actions it finds and the functions they call are sent, not whole files, except for Swift and any file it cannot parse; --dry-run lists every line without sending anything. Set AI_GATEWAY_API_KEY to send it to your own Vercel AI Gateway account instead, and Databuddy receives nothing. How the scanner handles your code: https://www.databuddy.cc/docs/privacy/event-scanner`;
+export const privacy = `Code is sent to Databuddy's scan API (${new URL(hostedScanUrl).host}), which classifies it with Claude. Only the actions it finds and the functions they call are sent, not whole files, except for Swift and any file it cannot parse; --dry-run lists every line without sending anything. How the scanner handles your code: https://www.databuddy.cc/docs/privacy/event-scanner`;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: Source paths and provider labels must not control the terminal.
 const controls = /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
 const clean = (value: string | number | null | undefined) =>
@@ -115,9 +115,7 @@ export function createTerminal({ json = false }: { json?: boolean } = {}) {
 		process.stderr.write(
 			files === 0
 				? "Nothing to send: every result is cached from an earlier scan.\n"
-				: destination.kind === "databuddy"
-					? `Sending code from ${count(files, "file")} to Databuddy's scan API (${destination.host}). Jev classifies it on Vercel AI Gateway with zero data retention; your source is never stored or logged. Preview with --dry-run, or set AI_GATEWAY_API_KEY to use your own gateway. https://www.databuddy.cc/docs/privacy/event-scanner\n`
-					: `Sending code from ${count(files, "file")} directly to your Vercel AI Gateway account (${destination.host}) with zero data retention. Databuddy receives nothing.\n`
+				: `Sending code from ${count(files, "file")} to Databuddy's scan API (${destination.host}), which classifies it with Claude. Preview with --dry-run. https://www.databuddy.cc/docs/privacy/event-scanner\n`
 		);
 	}
 
@@ -130,9 +128,7 @@ export function createTerminal({ json = false }: { json?: boolean } = {}) {
 
 	function dryRun(result: DryRun) {
 		if (json) {
-			return print([
-				JSON.stringify({ ...result, sent: false, zeroDataRetention: true }),
-			]);
+			return print([JSON.stringify({ ...result, sent: false })]);
 		}
 		const width = Math.max(0, ...result.files.map((file) => file.path.length));
 		if (result.files.length === 0) {

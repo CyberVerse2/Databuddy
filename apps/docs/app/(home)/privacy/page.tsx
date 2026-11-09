@@ -276,10 +276,10 @@ export default function PrivacyPage() {
 						</p>
 						<p className="mb-4 text-pretty">
 							AI features send prompts and supporting context to the configured
-							AI gateway and model providers. Connected delivery services
-							receive the findings or messages the customer configures them to
-							deliver. See our <a href="/data-policy">Data Policy</a> for
-							service-provider information.
+							AI model providers. Connected delivery services receive the
+							findings or messages the customer configures them to deliver. See
+							our <a href="/data-policy">Data Policy</a> for service-provider
+							information.
 						</p>
 						<div className="my-4 rounded border border-accent bg-accent/50 p-4">
 							<p className="text-sm">

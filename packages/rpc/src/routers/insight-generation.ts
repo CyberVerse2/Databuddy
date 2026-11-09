@@ -977,7 +977,7 @@ async function requireInvestigationsAccess(
 	organizationId: string
 ): Promise<void> {
 	if (billingMode() !== "live") {
-		if (!process.env.AI_GATEWAY_API_KEY?.trim()) {
+		if (!process.env.ANTHROPIC_API_KEY?.trim()) {
 			throw rpcError.badRequest(
 				"AI is not set up on this Databuddy instance. Ask your administrator to configure it before running investigations."
 			);

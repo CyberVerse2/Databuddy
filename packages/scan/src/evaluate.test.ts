@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	hostedScanUrl,
 	parseResponse,
 	requestEvaluation,
 	type Attempt,
@@ -10,6 +11,7 @@ import {
 const jobs = [
 	{ path: "src/action.ts", start: 7, end: 9, source: "await persist();\n" },
 ];
+const requestBody = JSON.stringify({ state: { segments: jobs, catalog: {} } });
 const response = () => ({
 	answers: {
 		coverage_0: { choice: "missing", probabilities: { missing: 0.8 } },
@@ -26,7 +28,6 @@ function options(overrides: Partial<EvaluationOptions> = {}) {
 		attempts,
 		retries,
 		value: {
-			apiKey: "fixture-key",
 			timeoutMs: 1000,
 			signal: new AbortController().signal,
 			onAttempt: (attempt: Attempt) => {
@@ -89,15 +90,8 @@ test("5xx and timeout retry twice, with complete attempt records and private hea
 	let count = 0;
 	await withFetch(
 		async (url, init) => {
-			assert.equal(url, "https://ai-gateway.vercel.sh/v4/ai/evaluation-model");
-			assert.equal(
-				new Headers(init?.headers).get("authorization"),
-				"Bearer fixture-key"
-			);
-			assert.equal(
-				new Headers(init?.headers).get("ai-model-id"),
-				"typesafe-ai/jev"
-			);
+			assert.equal(url, hostedScanUrl);
+			assert.equal(new Headers(init?.headers).get("authorization"), null);
 			assert.ok(init?.signal instanceof AbortSignal);
 			count++;
 			if (count === 1) {
@@ -112,7 +106,10 @@ test("5xx and timeout retry twice, with complete attempt records and private hea
 			return Response.json(response());
 		},
 		async () => {
-			assert.deepEqual(await requestEvaluation("{}", state.value), response());
+			assert.deepEqual(
+				await requestEvaluation(requestBody, state.value),
+				response()
+			);
 		}
 	);
 	assert.deepEqual(
@@ -143,8 +140,8 @@ test("exhausted 5xx, auth and rate limits stop at their exact attempt limits", a
 				),
 			async () => {
 				await assert.rejects(
-					requestEvaluation("{}", state.value),
-					new RegExp(`Gateway HTTP ${status}`)
+					requestEvaluation(requestBody, state.value),
+					new RegExp(`Scan HTTP ${status}`)
 				);
 			}
 		);
@@ -177,7 +174,7 @@ test("a per-minute rate limit waits for Retry-After and retries", async () => {
 			},
 			async () => {
 				assert.deepEqual(
-					await requestEvaluation("{}", state.value),
+					await requestEvaluation(requestBody, state.value),
 					response()
 				);
 			}
@@ -213,8 +210,8 @@ test("provider error bodies are bounded and cancelled without retaining body tex
 			),
 		async () => {
 			await assert.rejects(
-				requestEvaluation("{}", state.value),
-				/Gateway HTTP 401/
+				requestEvaluation(requestBody, state.value),
+				/Scan HTTP 401/
 			);
 		}
 	);
