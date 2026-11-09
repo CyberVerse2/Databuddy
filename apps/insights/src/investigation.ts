@@ -8,6 +8,7 @@ import dayjs from "dayjs";
 import timezonePlugin from "dayjs/plugin/timezone";
 import utcPlugin from "dayjs/plugin/utc";
 import type { DetectedSignal } from "./detection";
+import { cohortMeasurementEvidence } from "./error-customer-impact";
 
 dayjs.extend(utcPlugin);
 dayjs.extend(timezonePlugin);
@@ -21,6 +22,19 @@ interface InvestigationInput {
 export interface InvestigationAnnotation {
 	date: string;
 	title: string;
+}
+
+const LABEL_BREAKS = /[\s\p{Cc}\p{Cf}]+/gu;
+
+export function normalizedLabel(value: string): string {
+	return (
+		value.replace(LABEL_BREAKS, " ").trim() ||
+		Array.from(
+			value,
+			(character) =>
+				`U+${(character.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}`
+		).join(" ")
+	);
 }
 
 export function signalAnnotationWindow(
@@ -83,11 +97,14 @@ function metricFormat(metric: string): InsightMetric["format"] {
 	return "number";
 }
 
-function isLowerBetter(metric: string): boolean {
-	return ["bounce_rate", "error_count", "lcp", "inp", "refund_amount"].includes(
-		metric
-	);
-}
+export const LOWER_IS_BETTER_METRICS = new Set([
+	"bounce_rate",
+	"error_count",
+	"refund_amount",
+	"lcp",
+	"inp",
+]);
+export const TRAFFIC_METRICS = new Set(["visitors", "sessions", "pageviews"]);
 
 const SEVERITY_RANK = { critical: 2, warning: 1, info: 0 } as const;
 const ZERO_COMPLETION_SUBJECT_SUFFIX = ":zero-completions";
@@ -140,17 +157,14 @@ export function isRegression(signal: DetectedSignal): boolean {
 	if (signal.metric === "inp" && signal.current > 200) {
 		return true;
 	}
-	return isLowerBetter(signal.metric)
+	return LOWER_IS_BETTER_METRICS.has(signal.metric)
 		? signal.direction === "up"
 		: signal.direction === "down";
 }
 const SMALL_COUNT_FLOOR = 10;
 
 export function isInvestigationCandidate(signal: DetectedSignal): boolean {
-	if (
-		signal.severity === "info" &&
-		["visitors", "sessions", "pageviews"].includes(signal.metric)
-	) {
+	if (signal.severity === "info" && TRAFFIC_METRICS.has(signal.metric)) {
 		// Weak top-level traffic is useful context, not an agent turn by itself.
 		return false;
 	}
@@ -247,18 +261,22 @@ function entity(signal: DetectedSignal): InvestigationSignal["entity"] {
 	const exactId = idParts.join(":");
 	const rawId = exactId.trim();
 	const id = boundedKey(rawId);
+	const label = normalizedLabel(signal.entityLabel ?? signal.label).slice(
+		0,
+		120
+	);
 	if (prefix === "retention" && signal.metric === "identified_retention") {
 		return {
 			type: "cohort",
 			id,
-			label: (signal.entityLabel ?? signal.label).slice(0, 120),
+			label,
 		};
 	}
 	if (prefix === "funnel" && idParts.at(1) === "step") {
 		return {
 			type: "funnel_step",
 			id,
-			label: (signal.entityLabel ?? signal.label).slice(0, 120),
+			label,
 		};
 	}
 	if (prefix === "funnel" || prefix === "goal") {
@@ -268,59 +286,79 @@ function entity(signal: DetectedSignal): InvestigationSignal["entity"] {
 			// their entity must stay the configured definition so goal actions and
 			// funnel links continue to resolve the real ID.
 			id: boundedKey(idParts[0]?.trim() || rawId),
-			label: (signal.entityLabel ?? signal.label).slice(0, 120),
+			label,
 		};
 	}
 	if (prefix === "product_revenue" && signal.entityId) {
 		return {
 			type: "website",
 			id: signal.entityId,
-			label: (signal.entityLabel ?? signal.label).slice(0, 120),
+			label,
 		};
 	}
 	if (prefix === "custom_event" || prefix === "custom_event_reach") {
 		return {
 			id: signal.entityId ?? rawId,
-			label: (signal.entityLabel ?? signal.label).slice(0, 120),
+			label,
 			type: "event",
+		};
+	}
+	if (prefix === "ai_agents") {
+		return {
+			type: "channel",
+			id: boundedKey(signal.entityId ?? rawId),
+			label,
 		};
 	}
 	if (prefix === "route") {
 		return {
 			type: "page",
 			id: signal.entityId ?? rawId,
-			label: (signal.entityLabel ?? signal.label).slice(0, 120),
+			label,
 		};
 	}
 	if (signal.metric === "error_count") {
 		return {
 			type: "error",
 			id: (signal.entityId ?? exactId) || signal.metric,
-			label: (signal.entityLabel ?? signal.label).slice(0, 120),
+			label,
 		};
 	}
 	if (signal.metric === "lcp" || signal.metric === "inp") {
-		return { type: "vital", id: signal.metric, label: signal.label };
+		return {
+			type: "vital",
+			id: signal.metric,
+			label: normalizedLabel(signal.label),
+		};
 	}
-	return { type: "website", id: "website", label: signal.label.slice(0, 120) };
+	return {
+		type: "website",
+		id: "website",
+		label: normalizedLabel(signal.label).slice(0, 120),
+	};
 }
 
 function evidenceSummary(value: string): string {
 	return value.length <= 500 ? value : `${value.slice(0, 499).trimEnd()}…`;
 }
 
-function cohortMeasurementEvidence(signal: DetectedSignal): string | null {
-	const measurement = signal.cohortMeasurement;
-	if (!measurement) {
-		return null;
-	}
-	const difference =
-		Math.round(
-			(measurement.exposedContinuationPercent -
-				measurement.controlContinuationPercent) *
-				10
-		) / 10;
-	return `Among ${measurement.matchedSessions.toLocaleString("en-US")} error-exposed sessions and ${measurement.matchedSessions.toLocaleString("en-US")} matched control sessions on the same route, day, device, and browser, ${measurement.exposedContinuationPercent.toLocaleString("en-US", { maximumFractionDigits: 1 })}% of exposed sessions later viewed a different page within 10 minutes, versus ${measurement.controlContinuationPercent.toLocaleString("en-US", { maximumFractionDigits: 1 })}% of controls (${difference.toLocaleString("en-US", { maximumFractionDigits: 1 })} percentage points). This is an association, not proof that the error caused the difference.`;
+export function cohortEvidence(
+	signal: Pick<InvestigationSignal, "cohortMeasurement">
+): string | null {
+	const value = cohortMeasurementEvidence(signal);
+	return value ? evidenceSummary(value) : null;
+}
+
+export function annotationEvidence(
+	annotations: InvestigationAnnotation[]
+): string | null {
+	return annotations.length > 0
+		? evidenceSummary(
+				`Annotation: ${annotations
+					.map((annotation) => `${annotation.date}: ${annotation.title}`)
+					.join("; ")}`
+			)
+		: null;
 }
 
 export function prepareInvestigation(
@@ -345,12 +383,13 @@ export function prepareInvestigation(
 		signalKey: signalKeyForDetectedSignal(candidate),
 		entity: subject,
 		metric: {
-			label: candidate.label,
+			label: normalizedLabel(candidate.label),
 			current: candidate.current,
 			previous: candidate.baseline,
 			format: metricFormat(candidate.metric),
 		},
-		changePercent: candidate.deltaPercent,
+		changePercent:
+			candidate.method === "behavior" ? null : candidate.deltaPercent,
 		severity: sentiment === "positive" ? "info" : candidate.severity,
 		sentiment,
 		period: {
@@ -371,18 +410,13 @@ export function prepareInvestigation(
 	if (candidate.definitionEvidence) {
 		evidence.push(evidenceSummary(candidate.definitionEvidence));
 	}
-	const cohortEvidence = cohortMeasurementEvidence(candidate);
-	if (cohortEvidence) {
-		evidence.push(evidenceSummary(cohortEvidence));
+	const cohort = cohortEvidence(candidate);
+	if (cohort) {
+		evidence.push(cohort);
 	}
-	if (annotations.length > 0) {
-		evidence.push(
-			evidenceSummary(
-				`Annotation: ${annotations
-					.map((annotation) => `${annotation.date}: ${annotation.title}`)
-					.join("; ")}`
-			)
-		);
+	const annotation = annotationEvidence(annotations);
+	if (annotation) {
+		evidence.push(annotation);
 	}
 
 	return {

@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { MonitorStatus } from "./types";
 import {
+	buildSslExpiryNotificationPayload,
 	buildTransitionNotificationPayload,
 	buildUptimeDeliveryPlan,
+	DOWN_ALERT_COOLDOWN_SECONDS,
+	DOWN_ALERT_MIN_FAILURE_STREAK,
+	resolveSslExpiryAlert,
 	resolveTransitionKind,
 	resolveUptimeEmailPreference,
 	shouldReleaseTransitionClaim,
+	sslExpiryAlertKey,
 } from "./uptime-transition-alerts";
 import type { UptimeData } from "./types";
 
@@ -25,7 +30,7 @@ const baseUptimeData: UptimeData = {
 	response_bytes: 100,
 	retries: 0,
 	site_id: "monitor-1",
-	ssl_expiry: 0,
+	ssl_expiry: null,
 	ssl_valid: 1,
 	status: UP,
 	timestamp: Date.UTC(2026, 6, 11, 12, 30),
@@ -35,47 +40,82 @@ const baseUptimeData: UptimeData = {
 	user_agent: "Databuddy test",
 };
 
-describe("resolveTransitionKind — happy path transitions", () => {
-	test("fresh monitor going UP is silent", () => {
-		expect(resolveTransitionKind(undefined, UP)).toBeNull();
+const decide = (
+	lastNotified: number | undefined,
+	current: number,
+	failureStreak = current === DOWN ? DOWN_ALERT_MIN_FAILURE_STREAK : 0,
+	recentDownAlert = false
+) =>
+	resolveTransitionKind({
+		current,
+		failureStreak,
+		lastNotified,
+		recentDownAlert,
 	});
 
-	test("fresh monitor going DOWN fires a down alert", () => {
-		expect(resolveTransitionKind(undefined, DOWN)).toBe("down");
+describe("resolveTransitionKind", () => {
+	test("a single failed check is not alertable, including a monitor's first check", () => {
+		expect(decide(undefined, DOWN, 1)).toBeNull();
+		expect(decide(UP, DOWN, 1)).toBeNull();
 	});
 
-	test("UP → DOWN fires a down alert", () => {
-		expect(resolveTransitionKind(UP, DOWN)).toBe("down");
+	test("two consecutive failed checks fire one down alert", () => {
+		expect(decide(undefined, DOWN, 2)).toBe("down");
+		expect(decide(UP, DOWN, 2)).toBe("down");
+		expect(decide(DOWN, DOWN, 3)).toBeNull();
 	});
 
-	test("DOWN → UP fires a recovered alert", () => {
-		expect(resolveTransitionKind(DOWN, UP)).toBe("recovered");
-	});
-});
-
-describe("resolveTransitionKind — dedupe invariants", () => {
-	test("DOWN → DOWN is silent (no duplicate down alerts)", () => {
-		expect(resolveTransitionKind(DOWN, DOWN)).toBeNull();
+	test("recovery only follows a claimed down alert", () => {
+		expect(decide(DOWN, UP)).toBe("recovered");
+		expect(decide(UP, UP)).toBeNull();
+		expect(decide(undefined, UP)).toBeNull();
 	});
 
-	test("UP → UP is silent", () => {
-		expect(resolveTransitionKind(UP, UP)).toBeNull();
+	test("a down alert within the cooldown is held back", () => {
+		expect(decide(UP, DOWN, 2, true)).toBe("cooldown");
+		expect(decide(UP, DOWN, 1, true)).toBeNull();
 	});
-});
 
-describe("resolveTransitionKind — defensive inputs", () => {
 	test("unknown numeric current status is silent", () => {
-		expect(resolveTransitionKind(DOWN, 99)).toBeNull();
-		expect(resolveTransitionKind(UP, -1)).toBeNull();
+		expect(decide(DOWN, 99)).toBeNull();
+		expect(decide(UP, -1)).toBeNull();
 	});
 
-	test("NaN current never fires", () => {
-		expect(resolveTransitionKind(DOWN, Number.NaN)).toBeNull();
-		expect(resolveTransitionKind(UP, Number.NaN)).toBeNull();
-	});
+	test("a flapping one-minute monitor sends one down and one recovery per six hours", () => {
+		const MINUTE_MS = 60_000;
+		const cooldownMs = DOWN_ALERT_COOLDOWN_SECONDS * 1000;
+		let lastNotified: number | undefined;
+		let streak = 0;
+		let downAlertAt = Number.NEGATIVE_INFINITY;
+		const sent: Array<{ kind: string; minute: number }> = [];
+		const checks = Array.from({ length: 12 * 60 }, (_, minute) =>
+			minute % 3 === 2 ? UP : DOWN
+		);
 
-	test("NaN previous with DOWN current still alerts (prev !== DOWN)", () => {
-		expect(resolveTransitionKind(Number.NaN, DOWN)).toBe("down");
+		for (const [minute, status] of checks.entries()) {
+			const now = minute * MINUTE_MS;
+			streak = status === DOWN ? streak + 1 : 0;
+			const decision = decide(
+				lastNotified,
+				status,
+				streak,
+				now - downAlertAt < cooldownMs
+			);
+			if (decision === "down" || decision === "recovered") {
+				lastNotified = status;
+				sent.push({ kind: decision, minute });
+			}
+			if (decision === "down") {
+				downAlertAt = now;
+			}
+		}
+
+		expect(sent).toEqual([
+			{ kind: "down", minute: 1 },
+			{ kind: "recovered", minute: 2 },
+			{ kind: "down", minute: 361 },
+			{ kind: "recovered", minute: 362 },
+		]);
 	});
 });
 
@@ -112,6 +152,14 @@ describe("resolveUptimeEmailPreference", () => {
 
 		expect(resolveUptimeEmailPreference(settings, "down")).toBe(false);
 		expect(resolveUptimeEmailPreference(settings, "recovered")).toBe(true);
+	});
+
+	test("SSL expiry emails follow the down alert preference", () => {
+		const settings = {
+			uptime: { downEmails: false, recoveryEmails: true },
+		};
+
+		expect(resolveUptimeEmailPreference(settings, "ssl_expiry")).toBe(false);
 	});
 });
 
@@ -212,5 +260,113 @@ describe("buildTransitionNotificationPayload", () => {
 		expect(payload.message).toContain("Response time 245 ms");
 		expect(payload.message).not.toContain("outage");
 		expect(payload.message).not.toContain("operational again");
+	});
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NOW = Date.UTC(2026, 8, 1);
+
+describe("resolveSslExpiryAlert", () => {
+	test("alerts at exactly 14 days and stays silent one millisecond beyond", () => {
+		expect(
+			resolveSslExpiryAlert(
+				{ ...baseUptimeData, ssl_expiry: NOW + 14 * DAY_MS },
+				NOW
+			)
+		).toEqual({
+			daysRemaining: 14,
+			expiresAt: NOW + 14 * DAY_MS,
+			expired: false,
+		});
+		expect(
+			resolveSslExpiryAlert(
+				{ ...baseUptimeData, ssl_expiry: NOW + 14 * DAY_MS + 1 },
+				NOW
+			)
+		).toBeNull();
+	});
+
+	test("rounds a partial day up so a live certificate never reports 0 days", () => {
+		expect(
+			resolveSslExpiryAlert({ ...baseUptimeData, ssl_expiry: NOW + 1 }, NOW)
+		).toMatchObject({ daysRemaining: 1, expired: false });
+	});
+
+	test("flags an already expired certificate", () => {
+		expect(
+			resolveSslExpiryAlert(
+				{ ...baseUptimeData, ssl_expiry: NOW - 2 * DAY_MS },
+				NOW
+			)
+		).toMatchObject({ daysRemaining: 0, expired: true });
+		expect(
+			resolveSslExpiryAlert({ ...baseUptimeData, ssl_expiry: NOW }, NOW)
+		).toMatchObject({ expired: true });
+	});
+
+	test("ignores unknown expiry and non-https checks", () => {
+		expect(
+			resolveSslExpiryAlert({ ...baseUptimeData, ssl_expiry: null }, NOW)
+		).toBeNull();
+		expect(
+			resolveSslExpiryAlert({ ...baseUptimeData, ssl_expiry: 0 }, NOW)
+		).toBeNull();
+		expect(
+			resolveSslExpiryAlert(
+				{
+					...baseUptimeData,
+					ssl_expiry: NOW + DAY_MS,
+					url: "http://example.com",
+				},
+				NOW
+			)
+		).toBeNull();
+	});
+});
+
+describe("sslExpiryAlertKey", () => {
+	test("dedupes per certificate so a renewed certificate can alert again", () => {
+		const current = sslExpiryAlertKey("schedule-1", NOW + DAY_MS);
+
+		expect(sslExpiryAlertKey("schedule-1", NOW + DAY_MS)).toBe(current);
+		expect(sslExpiryAlertKey("schedule-1", NOW + 90 * DAY_MS)).not.toBe(
+			current
+		);
+		expect(sslExpiryAlertKey("schedule-2", NOW + DAY_MS)).not.toBe(current);
+	});
+});
+
+describe("buildSslExpiryNotificationPayload", () => {
+	const build = (ssl_expiry: number) => {
+		const alert = resolveSslExpiryAlert({ ...baseUptimeData, ssl_expiry }, NOW);
+		if (alert === null) {
+			throw new Error("expected an SSL expiry alert");
+		}
+		return buildSslExpiryNotificationPayload({
+			alert,
+			dashboardUrl: "https://app.databuddy.cc/monitors/monitor-1",
+			monitorId: "monitor-1",
+			siteLabel: "Example",
+			url: "https://example.com",
+		});
+	};
+
+	test("keeps an early warning at normal priority", () => {
+		const payload = build(NOW + 10 * DAY_MS);
+
+		expect(payload.title).toBe("SSL certificate expires in 10 days: Example");
+		expect(payload.priority).toBe("normal");
+	});
+
+	test("escalates within 3 days and after expiry", () => {
+		const soon = build(NOW + 3 * DAY_MS);
+		const expired = build(NOW - DAY_MS);
+
+		expect(soon.priority).toBe("high");
+		expect(build(NOW + DAY_MS).title).toBe(
+			"SSL certificate expires in 1 day: Example"
+		);
+		expect(expired.title).toBe("SSL certificate expired: Example");
+		expect(expired.priority).toBe("high");
 	});
 });

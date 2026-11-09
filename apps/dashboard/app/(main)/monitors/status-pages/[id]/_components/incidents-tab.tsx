@@ -13,10 +13,10 @@ import {
 	TrashIcon,
 	WarningCircleIcon,
 } from "@databuddy/ui/icons";
-import { CreateIncidentSheet } from "./create-incident-sheet";
-import { UpdateIncidentSheet } from "./update-incident-sheet";
+import { List } from "@/components/ui/composables/list";
+import { IncidentSheet } from "./create-incident-sheet";
 import { DeleteDialog } from "@databuddy/ui/client";
-import { Button, EmptyState, Skeleton } from "@databuddy/ui";
+import { Button, EmptyState } from "@databuddy/ui";
 
 const STATUS_LABELS: Record<string, string> = {
 	investigating: "Investigating",
@@ -24,6 +24,16 @@ const STATUS_LABELS: Record<string, string> = {
 	monitoring: "Monitoring",
 	resolved: "Resolved",
 };
+
+const SEVERITY_LABELS: Record<string, string> = {
+	minor: "Minor",
+	major: "Major",
+	critical: "Critical",
+};
+
+type Incident = Awaited<
+	ReturnType<typeof orpc.statusPage.listIncidents.call>
+>[number];
 
 interface IncidentsTabProps {
 	isSheetOpen: boolean;
@@ -38,11 +48,7 @@ export function IncidentsTab({
 }: IncidentsTabProps) {
 	const queryClient = useQueryClient();
 	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
-	const [updateTarget, setUpdateTarget] = useState<{
-		id: string;
-		title: string;
-		status: string;
-	} | null>(null);
+	const [updateTarget, setUpdateTarget] = useState<Incident | null>(null);
 
 	const incidentsQuery = useQuery({
 		...orpc.statusPage.listIncidents.queryOptions({
@@ -52,6 +58,7 @@ export function IncidentsTab({
 
 	const deleteMutation = useMutation({
 		...orpc.statusPage.deleteIncident.mutationOptions(),
+		meta: { errorTitle: "Failed to delete incident" },
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: orpc.statusPage.listIncidents.key({
@@ -59,12 +66,6 @@ export function IncidentsTab({
 				}),
 			});
 			toast.success("Incident deleted");
-			setDeleteTarget(null);
-		},
-		onError: (error) => {
-			toast.error(
-				error instanceof Error ? error.message : "Failed to delete incident"
-			);
 		},
 	});
 
@@ -73,19 +74,19 @@ export function IncidentsTab({
 	return (
 		<>
 			{incidentsQuery.isLoading ? (
-				<div className="divide-y">
-					{Array.from({ length: 2 }).map((_, i) => (
-						<div
-							className="flex items-center gap-4 px-5 py-3"
-							key={`inc-skel-${i + 1}`}
-						>
-							<Skeleton className="size-8 shrink-0 rounded-lg" />
-							<div className="min-w-0 flex-1 space-y-1.5">
-								<Skeleton className="h-4 w-48" />
-								<Skeleton className="h-3 w-72" />
-							</div>
-						</div>
-					))}
+				<List.DefaultLoading />
+			) : incidentsQuery.isError ? (
+				<div className="px-5 py-12">
+					<EmptyState
+						action={{
+							label: "Try again",
+							onClick: () => incidentsQuery.refetch(),
+						}}
+						description="Something went wrong while loading incidents."
+						icon={<SirenIcon />}
+						title="Failed to load incidents"
+						variant="error"
+					/>
 				</div>
 			) : incidents.length === 0 ? (
 				<div className="px-5 py-12">
@@ -97,12 +98,12 @@ export function IncidentsTab({
 								variant="secondary"
 							>
 								<PlusIcon className="size-3.5" />
-								Report Incident
+								Report incident
 							</Button>
 						}
 						description="Report an incident when something is wrong. It will appear on your public status page."
 						icon={<SirenIcon />}
-						title="No incidents"
+						title="No incidents yet"
 					/>
 				</div>
 			) : (
@@ -112,29 +113,21 @@ export function IncidentsTab({
 							incident={incident}
 							key={incident.id}
 							onDelete={() => setDeleteTarget(incident.id)}
-							onUpdate={() =>
-								setUpdateTarget({
-									id: incident.id,
-									title: incident.title,
-									status: incident.status,
-								})
-							}
+							onUpdate={() => setUpdateTarget(incident)}
 						/>
 					))}
 				</div>
 			)}
 
-			<CreateIncidentSheet
+			<IncidentSheet
 				onOpenChangeAction={onSheetOpenChange}
 				open={isSheetOpen}
 				statusPageId={statusPageId}
 			/>
 
 			{updateTarget && (
-				<UpdateIncidentSheet
-					currentStatus={updateTarget.status}
-					incidentId={updateTarget.id}
-					incidentTitle={updateTarget.title}
+				<IncidentSheet
+					incident={updateTarget}
 					onOpenChangeAction={(v) => {
 						if (!v) {
 							setUpdateTarget(null);
@@ -151,12 +144,12 @@ export function IncidentsTab({
 				isDeleting={deleteMutation.isPending}
 				isOpen={deleteTarget !== null}
 				onClose={() => setDeleteTarget(null)}
-				onConfirm={() => {
+				onConfirm={async () => {
 					if (deleteTarget) {
-						deleteMutation.mutate({ incidentId: deleteTarget });
+						await deleteMutation.mutateAsync({ incidentId: deleteTarget });
 					}
 				}}
-				title="Delete Incident"
+				title="Delete incident"
 			/>
 		</>
 	);
@@ -176,40 +169,27 @@ function IncidentRow({
 	onDelete,
 	onUpdate,
 }: {
-	incident: {
-		id: string;
-		title: string;
-		status: string;
-		severity: string;
-		createdAt: Date;
-		resolvedAt: Date | null;
-		updates: Array<{
-			id: string;
-			status: string;
-			message: string;
-			createdAt: Date;
-		}>;
-	};
+	incident: Incident;
 	onDelete: () => void;
 	onUpdate: () => void;
 }) {
 	const isResolved = incident.status === "resolved";
 
 	const iconBg = isResolved
-		? "bg-emerald-500/10"
+		? "bg-success/10"
 		: incident.severity === "critical"
-			? "bg-red-500/10"
+			? "bg-destructive/10"
 			: incident.severity === "major"
-				? "bg-amber-500/10"
+				? "bg-warning/10"
 				: "bg-muted";
 
 	const StatusIcon = isResolved ? CheckCircleIcon : WarningCircleIcon;
 	const iconColor = isResolved
-		? "text-emerald-500"
+		? "text-success"
 		: incident.severity === "critical"
-			? "text-red-500"
+			? "text-destructive"
 			: incident.severity === "major"
-				? "text-amber-500"
+				? "text-warning"
 				: "text-muted-foreground";
 
 	const latestUpdate = incident.updates[0];
@@ -232,15 +212,15 @@ function IncidentRow({
 					</p>
 					<span
 						className={cn(
-							"shrink-0 rounded px-1.5 py-0.5 font-semibold text-[10px] uppercase",
+							"shrink-0 rounded px-1.5 py-0.5 font-semibold text-[10px]",
 							incident.severity === "critical"
-								? "bg-red-500/10 text-red-600 dark:text-red-400"
+								? "bg-destructive/10 text-destructive"
 								: incident.severity === "major"
-									? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+									? "bg-warning/10 text-warning"
 									: "bg-muted text-muted-foreground"
 						)}
 					>
-						{incident.severity}
+						{SEVERITY_LABELS[incident.severity] ?? incident.severity}
 					</span>
 				</div>
 				<p className="text-muted-foreground text-xs">

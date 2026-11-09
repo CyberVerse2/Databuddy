@@ -3,11 +3,14 @@ import { GATED_FEATURES } from "@databuddy/shared/types/features";
 import {
 	OpenExternalIcon as ArrowSquareOutIcon,
 	BellIcon,
+	BrainIcon,
 	BugIcon,
+	ChartBarIcon,
 	ChartPieIcon as ChartPieSliceIcon,
 	CodeIcon,
 	CreditCardIcon,
 	CurrencyDollarIcon,
+	DatabaseIcon,
 	EyeIcon,
 	FileDownloadIcon as FileArrowDownIcon,
 	FlagIcon,
@@ -31,7 +34,6 @@ import {
 	ChartActivityIcon as PulseIcon,
 	ReceiptIcon,
 	RobotIcon,
-	SignalIcon,
 	ShieldCheckIcon,
 	TargetIcon,
 	UserIcon,
@@ -78,7 +80,7 @@ export const mainNavigation: NavigationGroup[] = [
 			}),
 			createNavItem("Databunny", RobotIcon, "/agent", {
 				activeMatch: "prefix",
-				alpha: true,
+				stage: "alpha",
 			}),
 		],
 	},
@@ -87,13 +89,14 @@ export const mainNavigation: NavigationGroup[] = [
 		items: [
 			createNavItem("Links", LinkIcon, "/links", {
 				activeMatch: "prefix",
-				tag: "BETA",
+				stage: "beta",
 			}),
 			createNavItem("Events", LightningIcon, "/events", {
 				activeMatch: "prefix",
+				stage: "alpha",
 				searchItems: [
 					{
-						name: "Events Stream",
+						name: "Events stream",
 						href: "/events/stream",
 						icon: ListBulletsIcon,
 						searchTags: ["custom events", "global events", "event log"],
@@ -106,6 +109,11 @@ export const mainNavigation: NavigationGroup[] = [
 					"event analytics",
 				],
 			}),
+			createNavItem("MCP analytics", ChartBarIcon, "/mcp", {
+				activeMatch: "prefix",
+				stage: "alpha",
+				searchTags: ["mcp server", "model context protocol", "tool calls"],
+			}),
 		],
 	},
 	{
@@ -113,12 +121,12 @@ export const mainNavigation: NavigationGroup[] = [
 		items: [
 			createNavItem("Monitors", HeartbeatIcon, "/monitors", {
 				activeMatch: "prefix",
-				tag: "BETA",
+				stage: "beta",
 			}),
-			createNavItem("Status Pages", GlobeSimpleIcon, "/monitors/status-pages", {
+			createNavItem("Status pages", GlobeSimpleIcon, "/monitors/status-pages", {
 				activeMatch: "prefix",
 				hideFromSidebar: true,
-				tag: "BETA",
+				stage: "beta",
 			}),
 		],
 	},
@@ -135,14 +143,27 @@ export const websiteNavigation: NavigationGroup[] = [
 		label: "",
 		items: [
 			createNavItem("Dashboard", ChartPieSliceIcon, "", { rootLevel: false }),
-			createNavItem("Realtime", SignalIcon, "/realtime", {
+			createNavItem("Map", MapPinIcon, "/map", {
 				rootLevel: false,
-				hideFromDemo: true,
+				gatedFeature: GATED_FEATURES.GEOGRAPHIC,
+				searchTags: [
+					"realtime",
+					"geographic",
+					"countries",
+					"live",
+					"locations",
+				],
 			}),
 			createNavItem("Audience", UsersThreeIcon, "/audience", {
 				rootLevel: false,
 			}),
-			createNavItem("Error Tracking", BugIcon, "/errors", {
+			createNavItem("AI agents", BrainIcon, "/agents", {
+				stage: "alpha",
+				hideFromDemo: true,
+				rootLevel: false,
+				searchTags: ["ai crawlers", "bots", "gptbot", "claudebot", "llm"],
+			}),
+			createNavItem("Error tracking", BugIcon, "/errors", {
 				rootLevel: false,
 				gatedFeature: GATED_FEATURES.ERROR_TRACKING,
 			}),
@@ -155,13 +176,9 @@ export const websiteNavigation: NavigationGroup[] = [
 				rootLevel: false,
 				gatedFeature: GATED_FEATURES.WEB_VITALS,
 			}),
-			createNavItem("Geographic", MapPinIcon, "/map", {
-				rootLevel: false,
-				gatedFeature: GATED_FEATURES.GEOGRAPHIC,
-			}),
 			createNavItem("Pulse", PulseIcon, "/pulse", {
 				rootLevel: false,
-				alpha: true,
+				stage: "alpha",
 			}),
 		],
 	},
@@ -172,7 +189,7 @@ export const websiteNavigation: NavigationGroup[] = [
 				rootLevel: false,
 				searchItems: [
 					{
-						name: "Events Stream",
+						name: "Events stream",
 						href: "/events/stream",
 						icon: ListBulletsIcon,
 						searchTags: ["custom events", "website events", "event log"],
@@ -199,14 +216,14 @@ export const websiteNavigation: NavigationGroup[] = [
 				rootLevel: false,
 				gatedFeature: GATED_FEATURES.GOALS,
 			}),
-			createNavItem("Feature Flags", FlagIcon, "/flags", {
-				alpha: true,
+			createNavItem("Feature flags", FlagIcon, "/flags", {
+				stage: "alpha",
 				rootLevel: false,
 				gatedFeature: GATED_FEATURES.FEATURE_FLAGS,
 				hideFromDemo: true,
 			}),
 			createNavItem("Revenue", CurrencyDollarIcon, "/revenue", {
-				alpha: true,
+				stage: "alpha",
 				rootLevel: false,
 				hideFromDemo: true,
 			}),
@@ -216,7 +233,7 @@ export const websiteNavigation: NavigationGroup[] = [
 		label: "AI",
 		items: [
 			createNavItem("Databunny", RobotIcon, "/agent", {
-				alpha: true,
+				stage: "alpha",
 				rootLevel: false,
 				hideFromDemo: true,
 			}),
@@ -238,9 +255,20 @@ export const websiteNavigation: NavigationGroup[] = [
 				rootLevel: false,
 				hideFromDemo: true,
 			}),
-			createNavItem("Data Export", FileArrowDownIcon, "/settings/export", {
+			createNavItem("Data export", FileArrowDownIcon, "/settings/export", {
 				rootLevel: false,
 				hideFromDemo: true,
+			}),
+			createNavItem("Data import", DatabaseIcon, "/settings/import", {
+				rootLevel: false,
+				hideFromDemo: true,
+				searchTags: [
+					"import",
+					"migrate",
+					"plausible",
+					"simple analytics",
+					"switch from",
+				],
 			}),
 			createNavItem("Setup", CodeIcon, "/settings/tracking", {
 				rootLevel: false,
@@ -266,19 +294,19 @@ export const settingsNavigation: NavigationGroup[] = [
 			createNavItem("General", GearIcon, "/organizations/settings", {
 				searchItems: [
 					{
-						name: "Organization Details",
+						name: "Organization details",
 						href: "#details",
 						icon: IdBadgeIcon,
 						searchTags: ["workspace details", "organization id", "slug"],
 					},
 					{
-						name: "Organization Websites",
+						name: "Organization websites",
 						href: "#websites",
 						icon: GlobeIcon,
 						searchTags: ["organization websites", "workspace sites"],
 					},
 					{
-						name: "API Keys",
+						name: "API keys",
 						href: "#api-keys",
 						icon: KeyIcon,
 						searchTags: [
@@ -299,7 +327,7 @@ export const settingsNavigation: NavigationGroup[] = [
 				],
 			}),
 			createNavItem(
-				"Business Context",
+				"Business context",
 				LightbulbIcon,
 				"/organizations/settings/business-context",
 				{
@@ -313,7 +341,7 @@ export const settingsNavigation: NavigationGroup[] = [
 			),
 			createNavItem("Members", UserIcon, "/organizations/members"),
 			createNavItem(
-				"Audit Log",
+				"Audit log",
 				ShieldCheckIcon,
 				"/organizations/settings/audit"
 			),
@@ -359,6 +387,16 @@ export function getNavContext(pathname: string): NavContext {
 		return "settings";
 	}
 	return "main";
+}
+
+export function withFlags(
+	groups: NavigationGroup[],
+	isOn: (flag: string) => boolean
+): NavigationGroup[] {
+	return groups.map((group) => ({
+		...group,
+		items: group.items.filter((item) => !item.flag || isOn(item.flag)),
+	}));
 }
 
 export function getNavigation(pathname: string): NavigationGroup[] {

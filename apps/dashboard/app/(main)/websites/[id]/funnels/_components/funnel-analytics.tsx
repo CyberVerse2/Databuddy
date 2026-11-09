@@ -57,7 +57,7 @@ function AnalyticsSkeleton() {
 				<StatCard icon={UsersIcon} isLoading title="Users" value={0} />
 				<StatCard icon={TargetIcon} isLoading title="Conversion" value={0} />
 				<StatCard icon={TrendDownIcon} isLoading title="Drop-off" value={0} />
-				<StatCard icon={ClockIcon} isLoading title="Avg Time" value={0} />
+				<StatCard icon={ClockIcon} isLoading title="Avg time" value={0} />
 			</div>
 
 			<div className="space-y-3">
@@ -138,15 +138,15 @@ export function FunnelAnalytics({
 
 	if (error) {
 		return (
-			<div className="red-angled-rectangle-gradient rounded border border-destructive/30 bg-destructive/5 p-4">
+			<div className="rounded border bg-card p-4">
 				<div className="flex items-center justify-between">
 					<div className="flex items-center gap-3">
 						<div className="flex size-9 items-center justify-center rounded bg-destructive/10">
 							<WarningCircleIcon className="size-5 text-destructive" />
 						</div>
 						<div>
-							<div className="font-medium text-destructive text-sm">
-								Error loading analytics
+							<div className="font-medium text-foreground text-sm">
+								Failed to load analytics
 							</div>
 							<div className="text-muted-foreground text-xs">
 								{error.message}
@@ -160,7 +160,7 @@ export function FunnelAnalytics({
 						variant="secondary"
 					>
 						<ArrowClockwiseIcon className="size-3.5" />
-						Retry
+						Try again
 					</Button>
 				</div>
 			</div>
@@ -216,13 +216,13 @@ export function FunnelAnalytics({
 					}
 					icon={ClockIcon}
 					showChart={hasChartData && displayData.duration_available}
-					title="Avg Time"
+					title="Avg time"
 					value={displayData.avg_completion_time_formatted || "—"}
 				/>
 			</div>
 
 			{hasErrorCorrelation && (
-				<div className="amber-angled-rectangle-gradient flex items-center gap-3 rounded border border-warning/20 bg-warning/5 p-3">
+				<div className="flex items-center gap-3 rounded border bg-card p-3">
 					<div className="flex size-8 shrink-0 items-center justify-center rounded bg-warning/10">
 						<BugIcon className="size-4 text-warning" />
 					</div>

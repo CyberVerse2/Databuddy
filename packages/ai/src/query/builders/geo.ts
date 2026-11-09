@@ -1,7 +1,7 @@
 import { Analytics } from "../../types/tables";
 import type { SimpleQueryConfig } from "../types";
 
-export const GeoBuilders: Record<string, SimpleQueryConfig> = {
+export const GeoBuilders = {
 	country: {
 		meta: {
 			title: "Countries",
@@ -38,7 +38,6 @@ export const GeoBuilders: Record<string, SimpleQueryConfig> = {
 				},
 			],
 			default_visualization: "table",
-			supports_granularity: ["hour", "day"],
 		},
 		table: Analytics.events,
 		fields: [
@@ -92,12 +91,12 @@ export const GeoBuilders: Record<string, SimpleQueryConfig> = {
 					name: "percentage",
 					type: "number",
 					label: "Traffic %",
-					description: "Percentage of total traffic",
+					description:
+						"Share of summed visitor counts across all region groups",
 					unit: "%",
 				},
 			],
 			default_visualization: "table",
-			supports_granularity: ["hour", "day"],
 		},
 		table: Analytics.events,
 		fields: [
@@ -194,12 +193,11 @@ export const GeoBuilders: Record<string, SimpleQueryConfig> = {
 					name: "percentage",
 					type: "number",
 					label: "Traffic %",
-					description: "Percentage of total traffic",
+					description: "Share of summed visitor counts across all city groups",
 					unit: "%",
 				},
 			],
 			default_visualization: "table",
-			supports_granularity: ["hour", "day"],
 		},
 		table: Analytics.events,
 		fields: [
@@ -217,4 +215,4 @@ export const GeoBuilders: Record<string, SimpleQueryConfig> = {
 		customizable: true,
 		plugins: { normalizeGeo: true },
 	},
-};
+} satisfies Record<string, SimpleQueryConfig>;

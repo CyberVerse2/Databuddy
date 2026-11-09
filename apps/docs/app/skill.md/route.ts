@@ -2,13 +2,13 @@ export const revalidate = false;
 
 const SKILL = `---
 name: databuddy
-description: Privacy-first analytics SDK. Browser tracking, server-side events, feature flags, and REST API.
-version: 2.6.0
+description: Cookieless product analytics SDK. Browser tracking, server-side events, feature flags, AI agent tracking, and REST API.
+version: 3.0.0
 ---
 
-# Databuddy SDK (v2.6)
+# Databuddy SDK (v3)
 
-Privacy-first analytics SDK. Covers browser tracking, server-side events, feature flags, and a REST API.
+Cookieless product analytics SDK. Covers browser tracking, server-side events, feature flags, AI agent tracking, and a REST API.
 
 ## External Documentation
 
@@ -16,7 +16,7 @@ Privacy-first analytics SDK. Covers browser tracking, server-side events, featur
 - Docs index: https://www.databuddy.cc/llms.txt
 - Framework guides: https://www.databuddy.cc/docs/Integrations
 
-> There is **no** \`@databuddy/sdk/ai/vercel\` entry point. AI/LLM tracking is not part of the SDK.
+> There is **no** \`@databuddy/sdk/ai/vercel\` entry point. The SDK does not trace LLM calls; tracking AI crawlers and agents that read your site is \`@databuddy/sdk/agents\`.
 
 ## SDK Entry Points
 
@@ -26,6 +26,7 @@ Privacy-first analytics SDK. Covers browser tracking, server-side events, featur
 | \`@databuddy/sdk/react\` | React/Next.js | \`<Databuddy />\` component, flags hooks, core re-exports |
 | \`@databuddy/sdk/node\` | Node.js/Server | \`Databuddy\` class (API-key auth), \`ServerFlagsManager\` |
 | \`@databuddy/sdk/vue\` | Vue 3 | \`<Databuddy />\` component, flags plugin and composables |
+| \`@databuddy/sdk/agents\` | Server proxy/middleware | \`trackAgents\` and a drop-in \`proxy\` that report AI crawlers and agents (GPTBot, ClaudeBot, Claude Code) |
 
 ## Quick Start
 
@@ -76,6 +77,17 @@ await client.track({
 
 await client.flush();
 \`\`\`
+
+### AI Agent Tracking (server-side, 3.0.0+)
+
+Crawlers and AI agents don't run JavaScript, so the browser script never sees them. Add one line on the server; no API key is needed:
+
+\`\`\`typescript
+// proxy.ts (Next.js 16). Next.js 15: middleware.ts with export { proxy as middleware }
+export { proxy } from "@databuddy/sdk/agents";
+\`\`\`
+
+It reads the website ID from \`NEXT_PUBLIC_DATABUDDY_CLIENT_ID\` (or \`DATABUDDY_WEBSITE_ID\`). Inside an existing proxy call \`event.waitUntil(trackAgents(request))\`; in Express, \`trackAgents(req)\` in a middleware. If the proxy has a \`matcher\`, don't exclude \`.md\` and \`.txt\` paths. Other stacks: https://www.databuddy.cc/docs/sdk/ai-agents.md
 
 ### Feature Flags (React)
 
@@ -129,14 +141,14 @@ Requires \`trackAttributes: true\`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| \`clientId\` | \`string\` | Auto-detect | Project client ID |
+| \`clientId\` | \`string\` | Auto-detect | Project Client ID |
 | \`disabled\` | \`boolean\` | \`false\` | Disable all tracking |
 | \`anonymizeVisitorIds\` | \`boolean \\| "auto"\` | \`true\` | Anonymize visitor IDs before storage |
 | \`apiUrl\` | \`string\` | \`https://basket.databuddy.cc\` | Event ingestion endpoint |
 | \`scriptUrl\` | \`string\` | \`https://cdn.databuddy.cc/databuddy.js\` | Custom browser bundle URL |
 | \`trackWebVitals\` | \`boolean\` | \`false\` | Core Web Vitals (FCP, LCP, INP, CLS, TTFB) plus FPS |
 | \`trackErrors\` | \`boolean\` | \`false\` | JavaScript error tracking |
-| \`trackInteractions\` | \`boolean\` | \`false\` | User interactions |
+| \`trackInteractions\` | \`boolean\` | \`true\` | Rage clicks, dead clicks, and abandoned forms |
 | \`trackOutgoingLinks\` | \`boolean\` | \`false\` | External link clicks |
 | \`trackHashChanges\` | \`boolean\` | \`false\` | URL hash changes |
 | \`trackAttributes\` | \`boolean\` | \`false\` | \`data-*\` attributes |
@@ -161,8 +173,8 @@ interface DatabuddyConfig {
   apiKey: string;              // Required. Format: dbdy_xxx
   apiUrl?: string;             // Default: "https://basket.databuddy.cc"
   websiteId?: string;          // Default website scope
-  namespace?: string;          // Default namespace (e.g., "billing")
-  source?: string;             // Default source (e.g., "backend")
+  namespace?: string;          // Default namespace (e.g. "billing")
+  source?: string;             // Default source (e.g. "backend")
   enableBatching?: boolean;    // Default: true
   batchSize?: number;          // Default: 10, max: 100
   enableDeduplication?: boolean; // Default: true (by eventId)
@@ -219,7 +231,7 @@ Accepts single event or array (max 100). Max payload: 1MB (2MB request body hard
 | API | https://api.databuddy.cc |
 | OpenAPI spec | https://www.databuddy.cc/openapi.json |
 | API reference | https://api.databuddy.cc/ |
-| MCP server | https://api.databuddy.cc/v1/mcp/ |
+| MCP server | https://api.databuddy.cc/v1/mcp |
 | MCP manifest | https://www.databuddy.cc/.well-known/mcp.json |
 | Event ingestion | https://basket.databuddy.cc |
 | CDN script | https://cdn.databuddy.cc/databuddy.js |
@@ -227,7 +239,7 @@ Accepts single event or array (max 100). Max payload: 1MB (2MB request body hard
 
 ## Common Pitfalls
 
-- Do NOT put client ID in server-only env vars. Use \`NEXT_PUBLIC_DATABUDDY_CLIENT_ID\`.
+- Do NOT put the Client ID in server-only env vars. Use \`NEXT_PUBLIC_DATABUDDY_CLIENT_ID\`.
 - Do NOT add \`<Databuddy />\` in multiple layouts. One at the root is enough.
 - The script auto-tracks SPA route changes. Do NOT manually call \`track\` for pageviews.
 - \`track()\` is client-side only. Do NOT call it in server components or API routes.

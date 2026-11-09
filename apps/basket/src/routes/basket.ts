@@ -9,6 +9,7 @@ import type {
 import {
 	analyticsEventSchema,
 	batchedCustomEventSpansSchema,
+	batchedEngagementSchema,
 	batchedErrorsSchema,
 	batchedVitalsSchema,
 	errorSpanSchema,
@@ -18,6 +19,7 @@ import {
 import {
 	buildTrackEvent,
 	insertCustomEvents,
+	insertEngagementSpans,
 	insertErrorSpans,
 	insertIndividualVitals,
 	insertOutgoingLink,
@@ -31,7 +33,7 @@ import { parseCorsSafeJson } from "@lib/cors-safe-json";
 import { summarizeRejectedBody } from "@lib/rejection-summary";
 import {
 	checkForBot,
-	type ValidatedRequest,
+	recordAiPageView,
 	validateRequest,
 } from "@lib/request-validation";
 import {
@@ -226,15 +228,18 @@ const app = new Elysia()
 			);
 			log.set({ clientId });
 
-			const botError = await checkForBot(
+			const botRejection = await checkForBot(
 				request,
 				eventData,
 				query,
 				clientId,
 				userAgent
 			);
-			if (botError) {
+			if (botRejection) {
 				log.set({ rejected: "bot" });
+				if (botRejection.isTrackOnly && eventType === "track") {
+					recordAiPageView(eventData, clientId, userAgent);
+				}
 				return createPixelResponse();
 			}
 
@@ -295,16 +300,16 @@ const app = new Elysia()
 
 			log.set({ count: parseResult.data.length });
 
-			const botError = await checkForBot(
+			const botRejection = await checkForBot(
 				request,
 				body,
 				query,
 				clientId,
 				userAgent
 			);
-			if (botError) {
+			if (botRejection) {
 				log.set({ rejected: "bot" });
-				return botError.error;
+				return botRejection.response;
 			}
 
 			const visitorCountry = await getVisitorCountryForAutoMode(
@@ -316,6 +321,55 @@ const app = new Elysia()
 			return Response.json({
 				status: "success",
 				type: "web_vitals",
+				count: parseResult.data.length,
+			});
+		} catch (error) {
+			rethrowOrWrap(error, log);
+		}
+	})
+	.post("/engagement", async ({ body, query, request }) => {
+		const log = useLogger();
+		log.set({ route: "engagement" });
+
+		try {
+			const { clientId, userAgent, ip } = await validateRequest(
+				body,
+				query,
+				request
+			);
+			log.set({ clientId });
+
+			const parseResult = batchedEngagementSchema.safeParse(body);
+			if (!parseResult.success) {
+				log.set({ rejected: "schema" });
+				throw createIngestSchemaValidationError(parseResult.error.issues);
+			}
+
+			log.set({ count: parseResult.data.length });
+
+			const botRejection = await checkForBot(
+				request,
+				body,
+				query,
+				clientId,
+				userAgent
+			);
+			if (botRejection) {
+				log.set({ rejected: "bot" });
+				return botRejection.response;
+			}
+
+			await insertEngagementSpans(
+				parseResult.data,
+				clientId,
+				userAgent,
+				ip,
+				request
+			);
+
+			return Response.json({
+				status: "success",
+				type: "engagement",
 				count: parseResult.data.length,
 			});
 		} catch (error) {
@@ -347,16 +401,16 @@ const app = new Elysia()
 
 			log.set({ count: parseResult.data.length });
 
-			const botError = await checkForBot(
+			const botRejection = await checkForBot(
 				request,
 				body,
 				query,
 				clientId,
 				userAgent
 			);
-			if (botError) {
+			if (botRejection) {
 				log.set({ rejected: "bot" });
-				return botError.error;
+				return botRejection.response;
 			}
 
 			const visitorCountry = await getVisitorCountryForAutoMode(
@@ -408,16 +462,16 @@ const app = new Elysia()
 
 			log.set({ count: parseResult.data.length });
 
-			const botError = await checkForBot(
+			const botRejection = await checkForBot(
 				request,
 				body,
 				query,
 				clientId,
 				userAgent
 			);
-			if (botError) {
+			if (botRejection) {
 				log.set({ rejected: "bot" });
-				return botError.error;
+				return botRejection.response;
 			}
 
 			const events = parseResult.data.map((event) => ({
@@ -464,7 +518,7 @@ const app = new Elysia()
 			log.set({ clientId, eventType });
 
 			if (eventType === "track") {
-				const [botError, parseResult] = await Promise.all([
+				const [botRejection, parseResult] = await Promise.all([
 					checkForBot(request, body, query, clientId, userAgent),
 					validateEventSchema(
 						analyticsEventSchema,
@@ -475,9 +529,12 @@ const app = new Elysia()
 					),
 				]);
 
-				if (botError) {
+				if (botRejection) {
 					log.set({ rejected: "bot" });
-					return botError.error;
+					if (botRejection.isTrackOnly) {
+						recordAiPageView(body, clientId, userAgent);
+					}
+					return botRejection.response;
 				}
 
 				if (!parseResult.success) {
@@ -496,7 +553,7 @@ const app = new Elysia()
 			}
 
 			if (eventType === "outgoing_link") {
-				const [botError, parseResult] = await Promise.all([
+				const [botRejection, parseResult] = await Promise.all([
 					checkForBot(request, body, query, clientId, userAgent),
 					validateEventSchema(
 						outgoingLinkSchema,
@@ -507,9 +564,9 @@ const app = new Elysia()
 					),
 				]);
 
-				if (botError) {
+				if (botRejection) {
 					log.set({ rejected: "bot" });
-					return botError.error;
+					return botRejection.response;
 				}
 
 				if (!parseResult.success) {
@@ -544,13 +601,11 @@ const app = new Elysia()
 				throw basketErrors.ingestBatchTooLarge();
 			}
 
-			const validation: ValidatedRequest = await validateRequest(
+			const { clientId, userAgent, ip } = await validateRequest(
 				body,
 				query,
 				request
 			);
-
-			const { clientId, userAgent, ip } = validation;
 			log.set({ clientId });
 
 			const trackEvents: BatchEvent<EventsInsert>[] = [];
@@ -577,14 +632,17 @@ const app = new Elysia()
 
 				try {
 					if (eventType === "track") {
-						const botError = await checkForBot(
+						const botRejection = await checkForBot(
 							request,
 							event,
 							query,
 							clientId,
 							userAgent
 						);
-						if (botError) {
+						if (botRejection) {
+							if (botRejection.isTrackOnly) {
+								recordAiPageView(event, clientId, userAgent);
+							}
 							results.push(batchBotIgnoredItem(eventType));
 							continue;
 						}
@@ -622,14 +680,14 @@ const app = new Elysia()
 							eventId: parseResult.data.eventId,
 						});
 					} else if (eventType === "outgoing_link") {
-						const botError = await checkForBot(
+						const botRejection = await checkForBot(
 							request,
 							event,
 							query,
 							clientId,
 							userAgent
 						);
-						if (botError) {
+						if (botRejection) {
 							results.push(batchBotIgnoredItem(eventType));
 							continue;
 						}
@@ -711,11 +769,7 @@ const app = new Elysia()
 			});
 
 			const failedCount = results.filter(
-				(result) =>
-					typeof result === "object" &&
-					result !== null &&
-					"status" in result &&
-					result.status === "error"
+				(result) => result.status === "error"
 			).length;
 			const responseStatus =
 				failedCount === 0

@@ -27,6 +27,7 @@ import {
 } from "@/lib/dashboard-navigation-actions";
 import { orpc } from "@/lib/orpc";
 import { cn } from "@/lib/utils";
+import { getUserFacingErrorMessage } from "@/lib/user-facing-error";
 import {
 	addDynamicFilterAtom,
 	currentFilterWebsiteIdAtom,
@@ -38,7 +39,7 @@ import { AnalyticsToolbar } from "./_components/analytics-toolbar";
 import { AddFilterForm } from "./_components/filters/add-filters";
 import { FiltersSection } from "./_components/filters/filters-section";
 import { SavedFiltersToolbar } from "./_components/filters/saved-filters-toolbar";
-import { WebsiteTrackingSetupTab } from "./_components/tabs/tracking-setup-tab";
+import { WebsiteTrackingGate } from "./_components/tracking-gate";
 import { useTrackingSetup } from "./hooks/use-tracking-setup";
 import { Button, usePersistentState } from "@databuddy/ui";
 import {
@@ -52,7 +53,6 @@ const ROUTES_WITHOUT_ANALYTICS_TOOLBAR = new Set([
 	"flags",
 	"map",
 	"pulse",
-	"realtime",
 	"settings",
 	"users",
 ]);
@@ -114,6 +114,11 @@ export default function WebsiteLayout({ children }: WebsiteLayoutProps) {
 	const setCurrentFilterWebsiteId = useSetAtom(currentFilterWebsiteIdAtom);
 	const [dynamicFilters, setDynamicFilters] = useAtom(dynamicQueryFiltersAtom);
 	const [isEmbed] = useQueryState("embed", parseAsBoolean.withDefault(false));
+	const [, setIsAgentSetupOpen] = useQueryState(
+		"setup",
+		parseAsBoolean.withDefault(false)
+	);
+	const isAgentsPage = pathname.split("/")[3] === "agents";
 	const [filtersParam, setFiltersParam] = useQueryState(
 		DASHBOARD_FILTERS_QUERY_PARAM,
 		parseAsString
@@ -188,6 +193,7 @@ export default function WebsiteLayout({ children }: WebsiteLayoutProps) {
 
 	const updateSettingsMutation = useMutation({
 		...orpc.websites.updateSettings.mutationOptions(),
+		meta: { suppressGlobalErrorToast: true },
 		onSuccess: (updatedWebsite) => {
 			updateWebsiteCache(queryClient, updatedWebsite);
 			queryClient.invalidateQueries({
@@ -240,12 +246,12 @@ export default function WebsiteLayout({ children }: WebsiteLayoutProps) {
 				settings: { allowedOrigins },
 			}),
 			{
-				loading: "Allowing tracking origin...",
+				loading: "Allowing tracking origin…",
 				success: `${trackingIssue.originHost} can now send analytics`,
-				error: (error: unknown) =>
-					error instanceof Error && error.message
-						? error.message
-						: "Failed to allow tracking origin",
+				error: (error: unknown) => ({
+					message: "Failed to allow tracking origin",
+					description: getUserFacingErrorMessage(error),
+				}),
 			}
 		);
 	}, [
@@ -270,12 +276,12 @@ export default function WebsiteLayout({ children }: WebsiteLayoutProps) {
 				settings: { ignoredTrackingOrigins },
 			}),
 			{
-				loading: "Ignoring tracking origin...",
+				loading: "Ignoring tracking origin…",
 				success: `${trackingIssue.originHost} warning hidden`,
-				error: (error: unknown) =>
-					error instanceof Error && error.message
-						? error.message
-						: "Failed to ignore tracking origin",
+				error: (error: unknown) => ({
+					message: "Failed to ignore tracking origin",
+					description: getUserFacingErrorMessage(error),
+				}),
 			}
 		);
 	}, [
@@ -358,6 +364,15 @@ export default function WebsiteLayout({ children }: WebsiteLayoutProps) {
 								)}
 							/>
 						</Button>
+						{isAgentsPage ? (
+							<Button
+								onClick={() => setIsAgentSetupOpen(true)}
+								size="sm"
+								variant="secondary"
+							>
+								Setup
+							</Button>
+						) : null}
 					</TopBar.Actions>
 
 					<AnalyticsToolbar
@@ -445,7 +460,7 @@ export default function WebsiteLayout({ children }: WebsiteLayoutProps) {
 					) : null}
 					{showTrackingSetup ? (
 						<div className="p-4">
-							<WebsiteTrackingSetupTab websiteId={websiteId} />
+							<WebsiteTrackingGate websiteId={websiteId} />
 						</div>
 					) : (
 						children

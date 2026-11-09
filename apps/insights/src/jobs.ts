@@ -1,6 +1,9 @@
 import { and, db, eq, inArray, lt, notInArray, sql } from "@databuddy/db";
 import { insightRunItems, insightRuns } from "@databuddy/db/schema";
 import {
+	AI_DIGEST_DISPATCH_JOB_NAME,
+	AI_DIGEST_WEBSITE_JOB_NAME,
+	type AiDigestWebsiteJobData,
 	INSIGHTS_DISPATCH_JOB_NAME,
 	INSIGHTS_GENERATE_WEBSITE_JOB_NAME,
 	INSIGHTS_MAINTENANCE_JOB_NAME,
@@ -11,7 +14,6 @@ import {
 	type InsightsResumeJobData,
 	insightsResumeJobId,
 } from "@databuddy/redis";
-import { markBusinessContextGeneration } from "@databuddy/services/organization-business-context";
 import type { Job } from "bullmq";
 import { z } from "zod";
 import {
@@ -23,6 +25,7 @@ import {
 	loadCompletedPreparedResult,
 	runIdentityCondition,
 } from "./effects";
+import { dispatchAiDigests, sendAiDigest } from "./ai-digest";
 import { recoverStaleInsightRuns, syncRunStatus } from "./recovery";
 import {
 	captureInsightsError,
@@ -44,13 +47,8 @@ const SUCCESSFUL_ITEM_STATUSES: ("skipped" | "succeeded")[] = [
 const resumeJobSchema = z
 	.object({ replyId: z.string().min(1).max(256) })
 	.strict();
-const retiredBusinessContextJobSchema = z.strictObject({
-	organizationId: z.string().min(1).max(256),
-	generationId: z.uuid(),
-});
-
 type InsightsJob = Pick<
-	Job<InsightsQueueJobData | z.infer<typeof retiredBusinessContextJobSchema>>,
+	Job<InsightsQueueJobData>,
 	"attemptsMade" | "attemptsStarted" | "data" | "id" | "name" | "opts"
 >;
 
@@ -392,7 +390,7 @@ async function processGenerateWebsiteJob(
 			organizationId: data.organizationId,
 			queueJobId: data.queueJobId,
 			reason: data.reason,
-			requestedByUserId: data.requestedByUserId ?? null,
+			requestedByUserId: data.requestedByUserId,
 			runId: data.runId,
 			timezone: data.timezone,
 			websiteId: data.websiteId,
@@ -434,19 +432,10 @@ export async function processInsightsJob(job: InsightsJob) {
 				);
 			} else if (job.name === INSIGHTS_RESUME_JOB_NAME) {
 				result = await processResumeJob(job.data as InsightsResumeJobData, job);
-			} else if (job.name === "insights-business-context") {
-				// Retire jobs admitted by APIs still running the previous release.
-				const data = retiredBusinessContextJobSchema.parse(job.data);
-				if (job.id !== `business-context-${data.generationId}`) {
-					throw new Error("Business context queue job identity does not match");
-				}
-				await markBusinessContextGeneration({
-					...data,
-					status: "failed",
-					error:
-						"Research now runs live. Refresh this page, then start again. Your saved context is unchanged.",
-				});
-				result = { status: "skipped" };
+			} else if (job.name === AI_DIGEST_DISPATCH_JOB_NAME) {
+				result = await dispatchAiDigests();
+			} else if (job.name === AI_DIGEST_WEBSITE_JOB_NAME) {
+				result = await sendAiDigest(job.data as AiDigestWebsiteJobData);
 			} else {
 				throw new Error(`Unknown insights job: ${job.name}`);
 			}

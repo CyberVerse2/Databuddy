@@ -6,6 +6,8 @@ import {
 } from "./sql-validation";
 
 const TENANT = "WHERE client_id = {websiteId:String}";
+const ORG_TENANT =
+	"(owner_id = {websiteId:String} OR website_id = {websiteId:String})";
 
 describe("validateAgentSQL", () => {
 	it("allows queries against analytics tables", () => {
@@ -30,20 +32,19 @@ describe("validateAgentSQL", () => {
 		expect(result.reason).toContain("alias");
 	});
 
-	it("accepts custom_events with owner_id tenant filter", () => {
+	it("accepts custom_events with the builders' owner_id or website_id filter", () => {
 		const result = validateAgentSQL(
-			"SELECT event_name, count() FROM analytics.custom_events WHERE owner_id = {websiteId:String} GROUP BY event_name"
+			`SELECT event_name, count() FROM analytics.custom_events WHERE ${ORG_TENANT} GROUP BY event_name`
 		);
-		expect(result.valid).toBe(true);
+		expect(result).toEqual({ valid: true, reason: null });
 	});
 
-	it("rejects analytics.revenue filtered with client_id (silent-empty footgun)", () => {
+	it("rejects analytics.revenue filtered with client_id", () => {
 		const result = validateAgentSQL(
 			"SELECT provider, sum(amount) FROM analytics.revenue WHERE client_id = {websiteId:String} GROUP BY provider"
 		);
 		expect(result.valid).toBe(false);
-		expect(result.reason).toContain("owner_id");
-		expect(result.reason).toContain("zero rows");
+		expect(result.reason).toContain(ORG_TENANT);
 	});
 
 	it("rejects analytics.custom_events filtered with client_id", () => {
@@ -62,11 +63,11 @@ describe("validateAgentSQL", () => {
 		expect(result.reason).toContain("client_id");
 	});
 
-	it("accepts mixed-table JOIN when each alias uses its required tenant column", () => {
+	it("accepts mixed-table JOIN when each alias uses its required tenant filter", () => {
 		const result = validateAgentSQL(
-			"SELECT r.provider, count() FROM analytics.revenue r JOIN analytics.events e ON r.transaction_id = e.session_id WHERE r.owner_id = {websiteId:String} AND e.client_id = {websiteId:String} GROUP BY r.provider"
+			"SELECT r.provider, count() FROM analytics.revenue r JOIN analytics.events e ON r.transaction_id = e.session_id WHERE (r.website_id = {websiteId:String} OR r.owner_id = {websiteId:String}) AND e.client_id = {websiteId:String} GROUP BY r.provider"
 		);
-		expect(result.valid).toBe(true);
+		expect(result).toEqual({ valid: true, reason: null });
 	});
 
 	it("rejects mixed-table JOIN when revenue alias uses client_id", () => {
@@ -99,22 +100,27 @@ describe("validateAgentSQL", () => {
 			"abc-123"
 		);
 		expect(out).toBe(
-			"{'analytics.events':'client_id=''abc-123''','analytics.error_spans':'client_id=''abc-123'''}"
+			"{'analytics.events':'client_id = ''abc-123''','analytics.error_spans':'client_id = ''abc-123'''}"
 		);
 	});
 
 	it("buildAdditionalTableFilters escapes single quotes in websiteId", () => {
 		const out = buildAdditionalTableFilters(["analytics.events"], "O'Brien");
-		expect(out).toBe("{'analytics.events':'client_id=''O''''Brien'''}");
+		expect(out).toBe("{'analytics.events':'client_id = ''O''''Brien'''}");
 	});
 
 	it("buildAdditionalTableFilters maps correct tenant columns and drops unknown tables", () => {
 		const out = buildAdditionalTableFilters(
-			["analytics.events", "analytics.custom_events", "analytics.unknown"],
+			[
+				"analytics.events",
+				"analytics.custom_events",
+				"analytics.revenue",
+				"analytics.unknown",
+			],
 			"abc"
 		);
 		expect(out).toBe(
-			"{'analytics.events':'client_id=''abc''','analytics.custom_events':'owner_id=''abc'''}"
+			"{'analytics.events':'client_id = ''abc''','analytics.custom_events':'(owner_id = ''abc'' OR website_id = ''abc'')','analytics.revenue':'(owner_id = ''abc'' OR website_id = ''abc'')'}"
 		);
 	});
 
@@ -152,6 +158,61 @@ describe("validateAgentSQL", () => {
 	it("handles double-quoted table names", () => {
 		const result = validateAgentSQL(
 			`SELECT path FROM "analytics.events" ${TENANT}`
+		);
+		expect(result).toEqual({ valid: true, reason: null });
+	});
+
+	it("rejects a # comment that hides a second query from the validator", () => {
+		const result = validateAgentSQL(
+			`SELECT 'filtered' AS src, count() AS c FROM analytics.events
+WHERE client_id = {websiteId:String} AND 1 = 1 # '
+UNION ALL SELECT 'all_revenue' AS src, count() AS c FROM analytics.revenue -- '`
+		);
+		expect(result.valid).toBe(false);
+		expect(result.reason).toContain("Comments are not allowed");
+	});
+
+	it("rejects every comment form ClickHouse accepts", () => {
+		for (const comment of ["# note", "#! note", "-- note", "/* note */"]) {
+			const result = validateAgentSQL(
+				`SELECT count() FROM analytics.events ${TENANT} ${comment}`
+			);
+			expect(result.valid).toBe(false);
+		}
+	});
+
+	it("rejects settings hidden behind a comment and quote", () => {
+		const result = validateAgentSQL(
+			`SELECT count() FROM analytics.events ${TENANT} # '
+SETTINGS additional_table_filters = {} -- '`
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it("rejects quoted identifiers that could hide a quote", () => {
+		for (const sql of [
+			`SELECT count() AS \`a'b\` FROM analytics.events ${TENANT}`,
+			`SELECT count() AS "a'b" FROM analytics.events ${TENANT}`,
+			`SELECT count() AS \`unclosed FROM analytics.events ${TENANT}`,
+		]) {
+			expect(validateAgentSQL(sql).valid).toBe(false);
+		}
+	});
+
+	it("rejects dollar-quoted strings and unterminated literals", () => {
+		expect(
+			validateAgentSQL(`SELECT $$x$$ FROM analytics.events ${TENANT}`).valid
+		).toBe(false);
+		expect(
+			validateAgentSQL(
+				`SELECT count() FROM analytics.events ${TENANT} AND path = '/a`
+			).valid
+		).toBe(false);
+	});
+
+	it("keeps comment and quote characters inside string literals", () => {
+		const result = validateAgentSQL(
+			`SELECT count() FROM analytics.events ${TENANT} AND path = '/a#b--c/*d$e"f''g\\'h'`
 		);
 		expect(result).toEqual({ valid: true, reason: null });
 	});
@@ -224,13 +285,190 @@ describe("validateAgentSQL", () => {
 			});
 		}
 
+		it.each([
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY url AS u`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY url u`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY "url" "u"`,
+			`SELECT u, count() FROM analytics.events e ${TENANT} GROUP BY "e".\`url\` u`,
+			"SELECT u FROM analytics.ai_traffic_spans a WHERE a.client_id = {websiteId:String} GROUP BY a.user_agent u",
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY toString(url) u`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY CAST(url AS String) u`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY CAST(url AS u AS String)`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY CAST(url AS u, 'String')`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY (url) u`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY url || '' u`,
+			`SELECT u FROM analytics.events ${TENANT} AND notEmpty(url AS u)`,
+			`SELECT u FROM analytics.events ${TENANT} AND notEmpty(url u)`,
+			`SELECT u FROM analytics.events ${TENANT} AND notEmpty(CAST((url AS u) AS String))`,
+			`SELECT u FROM analytics.events ${TENANT} AND notEmpty(CAST([url AS u] AS String))`,
+			`SELECT u FROM analytics.events ${TENANT} ORDER BY user_agent AS u`,
+			`SELECT u FROM analytics.events ${TENANT} ORDER BY concat(user_agent, '') u`,
+			`SELECT m, count() FROM analytics.revenue WHERE ${ORG_TENANT} GROUP BY metadata AS m`,
+			`SELECT m, count() FROM analytics.revenue WHERE ${ORG_TENANT} GROUP BY metadata m`,
+			`SELECT p, count() FROM analytics.custom_events WHERE ${ORG_TENANT} GROUP BY properties p`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY ip u`,
+			`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY url \`DESC\``,
+			`SELECT \`END\`, count() FROM analytics.events ${TENANT} GROUP BY url END`,
+			`SELECT \`CASE\`, count() FROM analytics.events ${TENANT} GROUP BY url CASE`,
+			`SELECT \`WHEN\`, count() FROM analytics.events ${TENANT} GROUP BY url WHEN`,
+			`SELECT \`THEN\`, count() FROM analytics.events ${TENANT} GROUP BY url THEN`,
+			`SELECT \`BY\`, count() FROM analytics.events ${TENANT} GROUP BY url BY`,
+			`SELECT \`OVER\`, count() FROM analytics.events ${TENANT} GROUP BY url OVER`,
+			`SELECT u FROM analytics.events ${TENANT} ORDER BY row_number() OVER (PARTITION BY notEmpty(url u))`,
+			`SELECT \`BY\` FROM analytics.events ${TENANT} ORDER BY row_number() OVER (PARTITION BY notEmpty(url BY))`,
+			`SELECT u FROM analytics.events ${TENANT} WINDOW w AS (PARTITION BY notEmpty(url AS u)) ORDER BY row_number() OVER w`,
+			`SELECT \`DISTINCT\` FROM analytics.events ${TENANT} GROUP BY (url DISTINCT)`,
+			`SELECT \`IS\`, count() FROM analytics.events ${TENANT} GROUP BY url IS`,
+			`SELECT \`END\` FROM analytics.events ${TENANT} AND CASE WHEN notEmpty(url END) THEN true ELSE false END`,
+			`SELECT \`ASC\` FROM analytics.events ${TENANT} ORDER BY CASE WHEN notEmpty(path) THEN url ASC ELSE path END`,
+			`SELECT \`BY\` FROM analytics.events ${TENANT} ORDER BY row_number() OVER (PARTITION BY CASE WHEN notEmpty(path) THEN url BY ELSE path END)`,
+			`SELECT \`STEP\` FROM analytics.events ${TENANT} ORDER BY length(path) WITH FILL STEP 1, CASE WHEN notEmpty(path) THEN url STEP ELSE path END`,
+			`SELECT u FROM analytics.events ${TENANT} LIMIT 1 BY url AS u`,
+			`SELECT u FROM analytics.events e WHERE e.client_id = {websiteId:String} LIMIT 1, 2 BY "e"."url" AS u`,
+			`SELECT u FROM analytics.events ${TENANT} LIMIT 1 OFFSET 2 BY toString(url) AS u`,
+			`SELECT u FROM analytics.events ARRAY JOIN [url] AS u ${TENANT}`,
+			"SELECT u FROM analytics.events e ARRAY JOIN [e.url] AS u WHERE e.client_id = {websiteId:String}",
+			`SELECT u FROM analytics.events ${TENANT} WINDOW w AS (PARTITION BY url AS u)`,
+			`SELECT COLUMNS('^prop') FROM analytics.custom_events WHERE ${ORG_TENANT}`,
+			`SELECT toJSONString(tuple(*)) FROM analytics.events ${TENANT}`,
+			`SELECT toJSONString(tuple(* APPLY toString)) FROM analytics.events ${TENANT}`,
+			`SELECT toJSONString(tuple(* APPLY(toString))) FROM analytics.events ${TENANT}`,
+			`SELECT toJSONString(tuple(path, * APPLY toString)) FROM analytics.events ${TENANT}`,
+			`SELECT path FROM analytics.events ${TENANT} AND notEmpty(toJSONString(tuple(path, * APPLY toString)))`,
+			"SELECT toJSONString(tuple(e.* APPLY toString)) FROM analytics.events e WHERE e.client_id = {websiteId:String}",
+			`SELECT count(* APPLY toString) FROM analytics.events ${TENANT}`,
+		])("rejects protected columns reached through aliases or matchers: %s", (sql) => {
+			expect(validateAgentSQL(sql).valid).toBe(false);
+		});
+
+		it.each([
+			`SELECT count(*) FROM analytics.events ${TENANT} AND url LIKE '%pricing%'`,
+			`SELECT path FROM analytics.events ${TENANT} AND toString(CAST(time AS Date)) = '2026-10-01'`,
+			`SELECT path FROM analytics.events ${TENANT} AND CAST(time AS Nullable(Date)) IS NOT NULL`,
+			`SELECT path FROM analytics.events ${TENANT} AND CAST((path, path) AS Tuple(first String, second String)).first = '/pricing'`,
+			`SELECT path FROM analytics.events ${TENANT} AND path IS NOT DISTINCT FROM '/pricing'`,
+			`SELECT path FROM analytics.events ${TENANT} AND path IN ('url', 'AS') AND time BETWEEN now() - INTERVAL 1 DAY AND now()`,
+			`SELECT path FROM analytics.events ${TENANT} AND url REGEXP '^https:' AND time_on_page DIV 2 MOD 3 = 0`,
+			`SELECT path FROM analytics.events ${TENANT} AND CASE WHEN url IS NULL THEN false ELSE notEmpty(url) END`,
+			`SELECT path FROM analytics.events ${TENANT} AND CASE path WHEN '' THEN CASE WHEN url IS NULL THEN false ELSE notEmpty(url) END ELSE true END`,
+			`SELECT count() FROM analytics.events ${TENANT} ORDER BY url DESC NULLS LAST`,
+			`SELECT count() FROM analytics.events ${TENANT} ORDER BY url ASC NULLS FIRST, path COLLATE 'en'`,
+			`SELECT path, count() FROM analytics.events ${TENANT} GROUP BY path WITH TOTALS ORDER BY path WITH FILL`,
+			`SELECT path, count() FROM analytics.events ${TENANT} GROUP BY path HAVING count(DISTINCT path) > 1`,
+			`SELECT path FROM analytics.events ${TENANT} ORDER BY row_number() OVER (PARTITION BY path ORDER BY time)`,
+			`SELECT path FROM analytics.events ${TENANT} ORDER BY CASE WHEN notEmpty(path) THEN row_number() OVER (PARTITION BY path ORDER BY time DESC) ELSE 0 END ASC`,
+			`SELECT path FROM analytics.events ${TENANT} ORDER BY CASE WHEN notEmpty(path) THEN length(path) ELSE 0 END WITH FILL STEP 1`,
+			`SELECT path FROM analytics.events ${TENANT} ORDER BY sum(time_on_page) OVER (PARTITION BY path ORDER BY time DESC ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)`,
+			`SELECT path FROM analytics.events ${TENANT} WINDOW w AS (PARTITION BY path ORDER BY time RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) ORDER BY row_number() OVER w`,
+			`SELECT path FROM analytics.events ${TENANT} LIMIT 1 BY path LIMIT 10`,
+			`SELECT path FROM analytics.events ${TENANT} LIMIT 1, 2 BY path`,
+			`SELECT path FROM analytics.events ${TENANT} LIMIT 1 OFFSET 2 BY path`,
+			`SELECT path FROM analytics.events ${TENANT} limit 1 offset 2 by path`,
+			`SELECT path FROM analytics.events ${TENANT} ORDER BY time LIMIT 2 WITH TIES`,
+			`SELECT path FROM analytics.events ${TENANT} OFFSET 1 ROW`,
+			`SELECT path FROM analytics.events ${TENANT} ORDER BY time OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY`,
+			`SELECT path FROM analytics.events ARRAY JOIN [path] ${TENANT}`,
+			"SELECT e.path FROM analytics.events e ARRAY JOIN [e.path] INNER JOIN analytics.ai_traffic_spans a ON e.client_id = a.client_id WHERE e.client_id = {websiteId:String} AND a.client_id = {websiteId:String}",
+			`WITH s AS (SELECT session_id AS sid FROM analytics.events ${TENANT}) SELECT e.path FROM analytics.events AS e JOIN s ON e.session_id = s.sid WHERE e.client_id = {websiteId:String}`,
+			`WITH s AS (SELECT session_id sid FROM analytics.events ${TENANT}) SELECT e.path FROM analytics.events e JOIN s ON e.session_id = s.sid WHERE e.client_id = {websiteId:String}`,
+		])("keeps filters, casts, table aliases and CTE aliases working: %s", (sql) => {
+			expect(validateAgentSQL(sql)).toEqual({ valid: true, reason: null });
+		});
+
+		it("preserves wildcard guards with long whitespace", () => {
+			const whitespace = "\t".repeat(12_000);
+			for (const expression of [
+				`count${whitespace}(*)`,
+				`COUNT(${whitespace}*)`,
+				`count(*${whitespace})`,
+				"tuple(2 * 3)",
+			]) {
+				expect(
+					validateAgentSQL(
+						`SELECT ${expression} FROM analytics.events ${TENANT}`
+					)
+				).toEqual({ valid: true, reason: null });
+			}
+			for (const expression of [
+				`tuple${whitespace}(*)`,
+				`tuple(*${whitespace})`,
+				`tuple(e.${whitespace}*)`,
+				`count(e.${whitespace}*)`,
+				`tuple(*${whitespace}APPLY${whitespace}toString)`,
+			]) {
+				expect(
+					validateAgentSQL(
+						`SELECT ${expression} FROM analytics.events e WHERE e.client_id = {websiteId:String}`
+					)
+				).toEqual({
+					valid: false,
+					reason: "Wildcard arguments are not allowed; pass explicit columns.",
+				});
+			}
+			expect(
+				validateAgentSQL(
+					`SELECT count() AS views ${whitespace} FROM analytics.events ${TENANT}`
+				)
+			).toEqual({ valid: true, reason: null });
+			expect(
+				validateAgentSQL(
+					`SELECT u, count() FROM analytics.events ${TENANT} GROUP BY url${whitespace}u`
+				).valid
+			).toBe(false);
+		});
+
 		it("rejects raw custom-event properties projections", () => {
 			const result = validateAgentSQL(
-				"SELECT properties FROM analytics.custom_events WHERE owner_id = {websiteId:String}"
+				`SELECT properties FROM analytics.custom_events WHERE ${ORG_TENANT}`
 			);
 			expect(result.valid).toBe(false);
 			expect(result.reason).toContain("properties");
 			expect(result.reason).toContain("sensitive");
+		});
+
+		it("rejects raw revenue metadata projections", () => {
+			const result = validateAgentSQL(
+				`SELECT transaction_id, metadata FROM analytics.revenue WHERE ${ORG_TENANT}`
+			);
+			expect(result.valid).toBe(false);
+			expect(result.reason).toContain("metadata");
+		});
+
+		it("rejects scalar WITH aliases that hide protected columns", () => {
+			for (const query of [
+				`WITH metadata AS m SELECT m FROM analytics.revenue WHERE ${ORG_TENANT}`,
+				`WITH url AS u SELECT u FROM analytics.events ${TENANT}`,
+				`WITH properties AS p SELECT p FROM analytics.custom_events WHERE ${ORG_TENANT}`,
+				`WITH safe AS (SELECT path FROM analytics.events ${TENANT}), url AS u SELECT u FROM analytics.events ${TENANT}`,
+				`WITH hidden AS (WITH metadata AS m SELECT m FROM analytics.revenue WHERE ${ORG_TENANT}) SELECT m FROM hidden`,
+				`WITH totals AS (SELECT path FROM analytics.events ${TENANT}), url AS u SELECT u FROM analytics.events ${TENANT}`,
+				"WITH ties.properties AS p SELECT p FROM analytics.custom_events ties WHERE (ties.owner_id = {websiteId:String} OR ties.website_id = {websiteId:String})",
+			]) {
+				const result = validateAgentSQL(query);
+				expect(result.valid).toBe(false);
+				expect(result.reason).toContain("CTEs only");
+			}
+		});
+
+		it("accepts WITH FILL, TOTALS, ROLLUP, CUBE and TIES modifiers", () => {
+			for (const query of [
+				`SELECT toDate(time) AS day, count() AS views FROM analytics.events ${TENANT} GROUP BY day ORDER BY day WITH FILL`,
+				`SELECT path, count() AS views FROM analytics.events ${TENANT} GROUP BY path WITH TOTALS ORDER BY views DESC`,
+				`WITH rolled AS (SELECT path, count() AS views FROM analytics.events ${TENANT} GROUP BY path WITH ROLLUP) SELECT path, views FROM rolled`,
+				`SELECT path, browser_name, count() AS views FROM analytics.events ${TENANT} GROUP BY path, browser_name WITH CUBE`,
+				`SELECT path, count() AS views FROM analytics.events ${TENANT} GROUP BY path ORDER BY views DESC LIMIT 10 WITH TIES`,
+			]) {
+				expect(validateAgentSQL(query)).toEqual({ valid: true, reason: null });
+			}
+		});
+
+		it("keeps aggregate and JSON-field expressions in CTE SELECTs", () => {
+			for (const query of [
+				`WITH daily AS (SELECT JSONExtractString(path, 'section') AS section, count(*) AS views FROM analytics.events ${TENANT} GROUP BY section) SELECT section, sum(views) FROM daily GROUP BY section`,
+				`WITH daily AS (WITH grouped AS (SELECT path, count(*) AS views FROM analytics.events ${TENANT} GROUP BY path) SELECT path, sum(views) AS views FROM grouped GROUP BY path) SELECT path, views FROM daily`,
+			]) {
+				expect(validateAgentSQL(query)).toEqual({ valid: true, reason: null });
+			}
 		});
 
 		it("allows unqualified allowlisted columns and aggregates", () => {
@@ -363,12 +601,12 @@ describe("validateAgentSQL", () => {
 			expect(result.valid).toBe(false);
 		});
 
-		it("ignores tenant markers inside comments", () => {
+		it("rejects tenant markers inside comments", () => {
 			const result = validateAgentSQL(
 				"SELECT * FROM analytics.events /* client_id = {websiteId:String} */ WHERE time > now()"
 			);
 			expect(result.valid).toBe(false);
-			expect(result.reason).toContain("client_id");
+			expect(result.reason).toContain("Comments are not allowed");
 		});
 
 		it("ignores tenant markers inside string literals", () => {
@@ -377,6 +615,94 @@ describe("validateAgentSQL", () => {
 			);
 			expect(result.valid).toBe(false);
 			expect(result.reason).toContain("client_id");
+		});
+
+		it("checks each CTE's tables against its own WHERE", () => {
+			const result = validateAgentSQL(
+				"WITH ev AS (SELECT event_name FROM analytics.custom_events WHERE owner_id = {websiteId:String}) SELECT event_name, count() FROM ev GROUP BY event_name"
+			);
+			expect(result.valid).toBe(false);
+			expect(result.reason).toContain(ORG_TENANT);
+		});
+
+		it("rejects a CTE that reads a table without a WHERE", () => {
+			const result = validateAgentSQL(
+				`WITH x AS (SELECT path FROM analytics.events) SELECT path FROM x ${TENANT}`
+			);
+			expect(result.valid).toBe(false);
+			expect(result.reason).toContain("WHERE clause");
+		});
+
+		it("lets a WHERE that only reads CTEs skip the tenant filter", () => {
+			const result = validateAgentSQL(
+				`WITH daily AS (SELECT toDate(time) AS day, count() AS views FROM analytics.events ${TENANT} GROUP BY day) SELECT day, views FROM daily WHERE views > 10`
+			);
+			expect(result).toEqual({ valid: true, reason: null });
+		});
+
+		it("accepts a revenue CTE joined to events", () => {
+			const result = validateAgentSQL(
+				`WITH paid AS (SELECT anonymous_id FROM analytics.revenue WHERE ${ORG_TENANT} AND type != 'refund') SELECT e.path, count() FROM analytics.events e JOIN paid p ON e.anonymous_id = p.anonymous_id WHERE e.client_id = {websiteId:String} GROUP BY e.path`
+			);
+			expect(result).toEqual({ valid: true, reason: null });
+		});
+	});
+
+	describe("org-keyed tables", () => {
+		it("rejects tenant groups used as negated or computed expressions", () => {
+			for (const where of [
+				`NOT ${ORG_TENANT}`,
+				`${ORG_TENANT} = 0`,
+				`CASE WHEN ${ORG_TENANT} THEN 0 ELSE 1 END`,
+				`type = 'sale' AND NOT ${ORG_TENANT}`,
+				`type = 'sale' AND ${ORG_TENANT} = 0`,
+			]) {
+				const result = validateAgentSQL(
+					`SELECT count() FROM analytics.revenue WHERE ${where}`
+				);
+				expect(result.valid).toBe(false);
+				expect(result.reason).toContain("tenant filter");
+			}
+		});
+
+		it("accepts positive tenant groups before or after other AND terms", () => {
+			for (const where of [
+				`${ORG_TENANT} AND type = 'sale'`,
+				`type = 'sale' AND ${ORG_TENANT}`,
+				`type = 'sale' AND ${ORG_TENANT} AND amount > 0`,
+			]) {
+				expect(
+					validateAgentSQL(
+						`SELECT count() FROM analytics.revenue WHERE ${where}`
+					)
+				).toEqual({ valid: true, reason: null });
+			}
+		});
+
+		for (const table of ["analytics.custom_events", "analytics.revenue"]) {
+			for (const column of ["owner_id", "website_id"]) {
+				it(`rejects ${table} filtered on ${column} alone`, () => {
+					const result = validateAgentSQL(
+						`SELECT count() FROM ${table} WHERE ${column} = {websiteId:String}`
+					);
+					expect(result.valid).toBe(false);
+					expect(result.reason).toContain(ORG_TENANT);
+				});
+			}
+		}
+
+		it("rejects a tenant group that is widened, nested, or split across aliases", () => {
+			for (const where of [
+				"(owner_id = {websiteId:String} OR website_id = {websiteId:String} OR 1=1)",
+				"((owner_id = {websiteId:String} OR website_id = {websiteId:String}) OR 1=1)",
+				"(owner_id = {websiteId:String} OR website_id = {otherSite:String})",
+				"(c.owner_id = {websiteId:String} OR website_id = {websiteId:String})",
+			]) {
+				const result = validateAgentSQL(
+					`SELECT count() FROM analytics.custom_events c WHERE ${where}`
+				);
+				expect(result.valid).toBe(false);
+			}
 		});
 	});
 

@@ -36,6 +36,7 @@
     "dev": "dotenv -- turbo run dev --env-mode=loose",
     "start": "NODE_ENV=production dotenv -- turbo run start --env-mode=loose",
     "test": "dotenv -- turbo run test",
+    "test:integration": "turbo run test:integration --concurrency=1 --continue",
     "test:watch": "dotenv -- bun test --watch ./apps --path-ignore-patterns='**/*.integration.test.ts'",
     "test:coverage": "dotenv -- bun test --coverage ./apps --path-ignore-patterns='**/*.integration.test.ts'",
     "lint": "bunx ultracite check && bun run lint:policies",
@@ -44,14 +45,14 @@
     "format": "bunx ultracite fix",
     "check-types": "dotenv -- turbo run check-types",
     "generate-db": "turbo run generate --filter=@databuddy/db",
-    "db:studio": "dotenv -- turbo run db:studio",
+    "db:studio": "dotenv -- sh -c 'NODE_ENV=${NODE_ENV:-development} turbo run db:studio \"$@\"' --",
     "clickhouse:init": "dotenv -- turbo run clickhouse:init",
     "clickhouse:dql:init": "dotenv -- bun packages/db/src/clickhouse/dql.ts",
     "ch:verify": "dotenv -- bun packages/db/src/clickhouse/verify.ts",
-    "db:push": "dotenv -- turbo run db:push",
+    "db:push": "dotenv -- sh -c 'NODE_ENV=${NODE_ENV:-development} turbo run db:push \"$@\"' --",
     "db:migrate": "dotenv -- turbo run db:migrate",
     "db:deploy": "dotenv -- turbo run db:deploy",
-    "db:seed": "dotenv -- sh -c 'cd packages/db && bun run db:seed \"$@\"' --",
+    "workspace": "NODE_ENV=development bun --no-env-file packages/test/src/setup.ts",
     "email:dev": "dotenv -- sh -c 'cd packages/email && bun run dev'",
     "email:segments": "dotenv -- sh -c 'cd packages/db && bun run email:segments \"$@\"' --",
     "sdk:build": "turbo run build --filter @databuddy/sdk",
@@ -60,12 +61,11 @@
     "dev:slack": "dotenv -- turbo dev --env-mode=loose --filter @databuddy/slack",
     "dev:status": "dotenv -- turbo dev --env-mode=loose --filter @databuddy/status --filter @databuddy/api",
     "git:setup-aliases": "git config --local include.path ../gitconfig",
-    "insights:production-shadow": "dotenv -- bun run --cwd apps/insights src/production-shadow.ts",
     "check": "ultracite check",
     "fix": "ultracite fix",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "turbo run build --filter=@databuddy/devtools --filter=@databuddy/sdk && changeset publish",
+    "release": "changeset publish",
     "clean": "find . -type d \\( -name node_modules -o -name .next -o -name .turbo -o -name turbo \\) -prune -print -exec rm -rf {} +"
   },
   "type": "module",
@@ -96,9 +96,6 @@
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.49",
-    "d3-geo": "^3.1.1",
-    "drizzle-orm": "^1.0.0-rc.1",
-    "topojson-client": "^3.1.0",
-    "world-atlas": "^2.0.2"
+    "drizzle-orm": "^1.0.0-rc.1"
   }
 }

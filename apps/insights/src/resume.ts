@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { readBooleanEnv } from "@databuddy/env/boolean";
 import { mergeBusinessContext } from "@databuddy/ai/lib/business-context";
 import {
 	assertBusinessScopeCurrent,
@@ -8,19 +9,17 @@ import {
 	unavailableBusinessContext,
 	withBusinessContextSnapshot,
 } from "./business-context";
+import { rankInvestigationBusinessContext } from "./business-context-ranking";
 import type { AppContext } from "@databuddy/ai/config/context";
 import { trackAgentUsage } from "@databuddy/ai/agents/execution";
-import { and, db, desc, eq, inArray, isNull, lte, ne } from "@databuddy/db";
+import { and, db, desc, eq, inArray, isNull, ne } from "@databuddy/db";
 import {
 	analyticsInsights,
 	insightObservations,
 	insightReplies,
 	websites,
 } from "@databuddy/db/schema";
-import {
-	invalidateAgentContextSnapshotsForWebsite,
-	invalidateInsightsCachesForOrganization,
-} from "@databuddy/redis";
+import { invalidateInsightsCachesForOrganization } from "@databuddy/redis";
 import { createServiceAuth } from "@databuddy/rpc";
 import {
 	insightReplySlackDeliverySchema,
@@ -34,15 +33,17 @@ import {
 	runInsightAgent,
 	clarifyInsight,
 	InsightAgentExecutionError,
+	savedVerificationCheck,
 } from "./agent";
 import {
 	loadInvestigationHistory,
 	loadClarificationContext,
 	loadOtherOpenWork,
+	loadSourceObservation,
 	nextRecheckAt,
 } from "./observations";
 import { refreshInvestigationSignal } from "./generation";
-import { caseValues } from "./persistence";
+import { caseValues, invalidateInsightCaches } from "./persistence";
 import { captureInsightsError } from "./lib/evlog-insights";
 import { deliverInsightSlackReply } from "./delivery";
 
@@ -95,14 +96,15 @@ async function deliverCompletedSlackReply(
 			)
 		)
 		.limit(1);
+	const context = {
+		...slackDelivery,
+		organizationId: target.organizationId,
+		websiteId: target.websiteId,
+	};
 	if (observation?.assistantText) {
 		await deliver({
 			clientMessageId: `${replyId}-success`,
-			context: {
-				...slackDelivery,
-				organizationId: target.organizationId,
-				websiteId: target.websiteId,
-			},
+			context,
 			result: null,
 			text: observation.assistantText,
 		});
@@ -115,11 +117,7 @@ async function deliverCompletedSlackReply(
 	}
 	await deliver({
 		clientMessageId: `${replyId}-success`,
-		context: {
-			...slackDelivery,
-			organizationId: target.organizationId,
-			websiteId: target.websiteId,
-		},
+		context,
 		result: { outcome, signal },
 	});
 }
@@ -165,10 +163,16 @@ export async function resumeInsightReply(
 	investigate: Investigate = runInsightAgent,
 	deliverSlackReply: typeof deliverInsightSlackReply = deliverInsightSlackReply,
 	refresh: Refresh = refreshInvestigationSignal,
-	business = {
+	business: {
+		loadCurrentBusinessScope: typeof loadCurrentBusinessScope;
+		loadBusinessProfile: typeof loadWebsiteBusinessProfile;
+		recallBusinessContext: typeof recallWebsiteBusinessContext;
+		rankBusinessContext?: typeof rankInvestigationBusinessContext;
+	} = {
 		loadCurrentBusinessScope,
 		loadBusinessProfile: loadWebsiteBusinessProfile,
 		recallBusinessContext: recallWebsiteBusinessContext,
+		rankBusinessContext: rankInvestigationBusinessContext,
 	},
 	clarify: typeof clarifyInsight = clarifyInsight
 ): Promise<"skipped" | "succeeded"> {
@@ -286,15 +290,7 @@ export async function resumeInsightReply(
 			}
 			throw error;
 		});
-		trackAgentUsage({
-			modelId: answer.modelId,
-			usage: answer.usage,
-			source: "insights",
-			organizationId: trigger.organizationId,
-			websiteId: trigger.websiteId,
-			userId: trigger.authorId,
-			chatId: `insights:clarification:${replyId}`,
-		});
+		track(answer);
 		const completed = await db.transaction(async (tx) => {
 			const [site] = await tx
 				.select({ id: websites.id })
@@ -339,7 +335,7 @@ export async function resumeInsightReply(
 	let charge:
 		| Awaited<ReturnType<typeof reserveInvestigationCharge>>
 		| undefined;
-	if (intent === "analysis") {
+	if (intent === "analysis" && !readBooleanEnv("SELFHOST")) {
 		const billing = await resolveInvestigationBilling({
 			organizationId: trigger.organizationId,
 			userId: trigger.authorId,
@@ -371,26 +367,34 @@ export async function resumeInsightReply(
 		// After the explicit reservation, reconcile persisted team statements before
 		// current measurement. Unacknowledged writes retain the PG fallback.
 		const currentScope = await business.loadCurrentBusinessScope(scope, true);
-		const profile = await business
-			.loadBusinessProfile({
-				scope: currentScope,
-				asOf: startedAt,
-				allowRefresh: true,
-			})
-			.catch((error) => unavailableBusinessContext(error, scope, startedAt));
-		const recalledAt = new Date();
-		const businessContext = mergeBusinessContext(
-			profile,
-			await business
+		const loadBusinessContext = async () => {
+			const profile = await business
+				.loadBusinessProfile({
+					scope: currentScope,
+					asOf: startedAt,
+					allowRefresh: true,
+				})
+				.catch((error) => unavailableBusinessContext(error, scope, startedAt));
+			const recalledAt = new Date();
+			const query = `${trigger.subjectKey}\n${trigger.body}`;
+			const related = await business
 				.recallBusinessContext({
 					scope: currentScope,
 					allowWrite: true,
 					asOf: recalledAt,
 					subjectKey: trigger.subjectKey,
-					query: `${trigger.subjectKey}\n${trigger.body}`,
+					query,
 				})
-				.catch((error) => unavailableBusinessContext(error, scope, recalledAt))
-		);
+				.catch((error) => unavailableBusinessContext(error, scope, recalledAt));
+			return intent === "analysis" && business.rankBusinessContext
+				? await business.rankBusinessContext({
+						contexts: [profile, related],
+						query,
+						subjectKey: trigger.subjectKey,
+						onUsage: track,
+					})
+				: mergeBusinessContext(profile, related);
+		};
 		const [history, otherOpenWork] = await Promise.all([
 			loadInvestigationHistory({
 				beforeReply: { createdAt: trigger.createdAt, id: replyId },
@@ -406,32 +410,17 @@ export async function resumeInsightReply(
 			}),
 		]);
 		if (intent === "verification") {
-			const [source] = await db
-				.select({
-					id: insightObservations.id,
-					asOf: insightObservations.asOf,
-					evidence: insightObservations.evidence,
-					outcome: insightObservations.outcome,
-					signal: insightObservations.signal,
-				})
-				.from(insightObservations)
-				.where(
-					and(
-						eq(insightObservations.organizationId, trigger.organizationId),
-						eq(insightObservations.websiteId, trigger.websiteId),
-						eq(insightObservations.signalKey, trigger.subjectKey),
-						trigger.sourceObservationId
-							? eq(insightObservations.id, trigger.sourceObservationId)
-							: lte(insightObservations.createdAt, trigger.createdAt)
-					)
-				)
-				.orderBy(
-					desc(insightObservations.createdAt),
-					desc(insightObservations.id)
-				)
-				.limit(1);
-			const sourceOutcome = parseInvestigationOutcome(source?.outcome);
-			const sourceSignal = parseInvestigationSignal(source?.signal);
+			const {
+				source,
+				outcome: sourceOutcome,
+				signal: sourceSignal,
+			} = await loadSourceObservation({
+				sourceObservationId: trigger.sourceObservationId,
+				organizationId: trigger.organizationId,
+				websiteId: trigger.websiteId,
+				signalKey: trigger.subjectKey,
+				createdAtOrBefore: trigger.createdAt,
+			});
 			if (!(source && sourceOutcome && sourceSignal)) {
 				throw new Error(
 					"The original investigation is unavailable for verification"
@@ -466,6 +455,11 @@ export async function resumeInsightReply(
 		if (!latest || latest.kind !== "investigation") {
 			throw new Error("This investigation has no history to resume");
 		}
+		const businessContext =
+			intent === "verification" &&
+			savedVerificationCheck({ history, signal: latest.signal })
+				? undefined
+				: await loadBusinessContext();
 
 		const currentMeasurement = await refresh({
 			asOf: startedAt,
@@ -494,9 +488,11 @@ export async function resumeInsightReply(
 		const result = await investigate({
 			appContext,
 			...{ businessContext },
+			customerImpact: currentMeasurement.customerImpact,
 			evidence: currentMeasurement.evidence,
 			githubRepository: trigger.integrations?.github ?? null,
 			history,
+			investigationObjective: currentMeasurement.investigationObjective,
 			otherOpenWork,
 			request: {
 				kind: intent === "verification" ? "verification" : undefined,
@@ -584,7 +580,9 @@ export async function resumeInsightReply(
 			const observationId = randomUUIDv7();
 			await tx.insert(insightObservations).values({
 				asOf: committedAt,
-				evidence: currentMeasurement.evidence,
+				evidence: currentMeasurement.evidence.map((entry) =>
+					typeof entry === "string" ? entry : entry.value
+				),
 				snapshot: result.snapshot && {
 					...result.snapshot,
 					completion: complete ? "complete" : "incomplete",
@@ -608,17 +606,11 @@ export async function resumeInsightReply(
 
 		outcomeSaved = true;
 		if (committed) {
-			try {
-				await Promise.all([
-					invalidateInsightsCachesForOrganization(trigger.organizationId),
-					invalidateAgentContextSnapshotsForWebsite(trigger.websiteId),
-				]);
-			} catch (error) {
-				captureInsightsError(error, "resume.cache_invalidation.failed", {
-					organization_id: trigger.organizationId,
-					website_id: trigger.websiteId,
-				});
-			}
+			await invalidateInsightCaches(
+				trigger.organizationId,
+				trigger.websiteId,
+				"resume.cache_invalidation.failed"
+			);
 		}
 		await deliverCompletedSlackReply(replyId, trigger, deliverSlackReply);
 		if (charge) {

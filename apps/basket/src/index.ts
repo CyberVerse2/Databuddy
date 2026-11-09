@@ -12,10 +12,9 @@ import { readBooleanEnv } from "@databuddy/env/boolean";
 import { getRedisCache } from "@databuddy/redis/redis";
 import {
 	checkProducerConnection,
-	disconnect,
-	disposeRuntime,
 	runPromise,
 	ShutdownDrainError,
+	shutDownProducer,
 } from "@lib/producer";
 import {
 	createDatabuddyEvlogEnv,
@@ -31,7 +30,7 @@ import { captureError } from "@lib/tracing";
 import { BASKET_SHUTDOWN_TIMEOUT_MS } from "@lib/shutdown-budget";
 import basketRouter from "@routes/basket";
 import { identifyRoute } from "@routes/identify";
-import { trackRoute } from "@routes/track";
+import { trackRoute, vercelDrainRoute } from "@routes/track";
 import { paddleWebhook } from "@routes/webhooks/paddle";
 import { stripeWebhook } from "@routes/webhooks/stripe";
 import { closeGeoIPReader } from "@utils/ip-geo";
@@ -91,7 +90,7 @@ async function gracefulShutdown(signal: string, exitCode = 0) {
 		const { shutdownRedis } = await import("@databuddy/redis");
 		// Wait for acknowledged delivery before tearing down its dependencies.
 		try {
-			await runPromise(disconnect);
+			await runPromise(shutDownProducer);
 		} catch (error) {
 			finalExitCode = 1;
 			if (error instanceof ShutdownDrainError) {
@@ -104,13 +103,6 @@ async function gracefulShutdown(signal: string, exitCode = 0) {
 				});
 			} else {
 				logErr("producerDrain")(error);
-			}
-		} finally {
-			try {
-				await disposeRuntime();
-			} catch (error) {
-				finalExitCode = 1;
-				logErr("runtimeDispose")(error);
 			}
 		}
 		await Promise.all([
@@ -188,6 +180,7 @@ const app = new Elysia()
 	.use(basketRouter)
 	.use(identifyRoute)
 	.use(trackRoute)
+	.use(vercelDrainRoute)
 	.use(stripeWebhook)
 	.use(paddleWebhook)
 	.get("/health/status", async function basketHealthStatus() {
@@ -202,7 +195,11 @@ const app = new Elysia()
 			} catch (err) {
 				log.error({
 					health_probe: name,
-					error_message: err instanceof Error ? err.message : String(err),
+					error_message:
+						err instanceof Error
+							? err.message ||
+								(err.cause instanceof Error ? err.cause.message : err.name)
+							: String(err),
 				});
 				return {
 					status: "error" as const,
@@ -248,5 +245,5 @@ const port = process.env.PORT || 4000;
 export default {
 	fetch: app.fetch,
 	port,
-	maxRequestBodySize: 2 * 1024 * 1024,
+	maxRequestBodySize: 10 * 1024 * 1024,
 };

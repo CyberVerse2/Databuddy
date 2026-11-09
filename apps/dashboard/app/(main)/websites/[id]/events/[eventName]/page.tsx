@@ -76,11 +76,11 @@ export default function EventDetailPage() {
 	if (error) {
 		return (
 			<div className="p-3 sm:p-4">
-				<div className="rounded-lg border border-destructive/20 bg-destructive/5 p-6">
+				<div className="rounded-lg border bg-card p-6">
 					<EmptyState
 						description="There was an issue loading data for this event."
 						icon={<LightningIcon />}
-						title="Error loading event data"
+						title="Failed to load event data"
 						variant="error"
 					/>
 				</div>
@@ -147,7 +147,7 @@ export default function EventDetailPage() {
 
 					<Card>
 						<Card.Header>
-							<Card.Title>Recent Events</Card.Title>
+							<Card.Title>Recent events</Card.Title>
 							<Card.Description>
 								Latest occurrences of this event
 							</Card.Description>

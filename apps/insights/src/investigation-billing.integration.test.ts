@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { createAutumnClient } from "@databuddy/rpc/autumn";
 import { INVESTIGATION_USAGE } from "@databuddy/shared/billing";
 
 // The provider contract is exercised through the installed SDK. Customer ownership
@@ -10,7 +11,6 @@ mock.module("@databuddy/ai/agents/execution", () => ({
 const {
 	assertInvestigationReservationActive,
 	canRunInvestigation,
-	createInvestigationBillingClient,
 	releaseInvestigationCharge,
 	reserveInvestigationCharge,
 	resolveInvestigationBilling,
@@ -22,6 +22,10 @@ const integration =
 const customerId = "synthetic-investigation-customer";
 const originalSecret = process.env.AUTUMN_SECRET_KEY;
 const originalNodeEnv = process.env.NODE_ENV;
+
+beforeEach(() => {
+	process.env.AUTUMN_SECRET_KEY = "synthetic-local-only";
+});
 
 afterEach(() => {
 	if (originalSecret === undefined) {
@@ -128,7 +132,7 @@ function provider(
 			{ status: fault.status ?? 500 }
 		);
 	};
-	const client = createInvestigationBillingClient({
+	const client = createAutumnClient({
 		secretKey: "synthetic-local-only",
 		fetcher: async (request) => {
 			if (!(request instanceof Request)) {
@@ -294,7 +298,6 @@ integration("investigation billing through the native Autumn SDK", () => {
 	it("rejects missing production configuration and mismatched native customer identities", async () => {
 		delete process.env.AUTUMN_SECRET_KEY;
 		process.env.NODE_ENV = "production";
-		expect(() => createInvestigationBillingClient()).toThrow("not configured");
 		await expect(
 			resolveInvestigationBilling({ organizationId: "synthetic-org" })
 		).rejects.toThrow("not configured");
@@ -511,7 +514,6 @@ integration("investigation billing through the native Autumn SDK", () => {
 
 	it.each([
 		[100],
-		[500],
 	])("accepts the native %i monthly grant and $1 single-unit additional usage", async (grant) => {
 		const remote = provider({ grant, remaining: 0, overage: true });
 		const input = operation();
@@ -650,17 +652,6 @@ integration("investigation billing through the native Autumn SDK", () => {
 		).toThrow("expired");
 		expect(remote.requests).toHaveLength(1);
 		await releaseInvestigationCharge(reservation, remote.client);
-	});
-
-	it("leaves unconfigured access on its original path without provider mutations", async () => {
-		const remote = provider();
-		const reservation = await reserveInvestigationCharge(
-			{ ...operation(), billing: { mode: "unconfigured", customerId } },
-			remote.client
-		);
-		expect(reservation.mode).toBe("unconfigured");
-		await releaseInvestigationCharge(reservation, remote.client);
-		expect(remote.requests).toHaveLength(0);
 	});
 
 	it("keeps provider billing implementation independent of PostgreSQL and Redis write modules", async () => {

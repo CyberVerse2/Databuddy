@@ -1,5 +1,7 @@
 "use client";
 
+import { APP_EVENTS } from "@databuddy/shared/custom-events";
+import { trackAppEvent } from "@/lib/app-events";
 import { authClient } from "@databuddy/auth/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useRouter } from "next/navigation";
@@ -16,6 +18,7 @@ import {
 	XCircleIcon,
 } from "@databuddy/ui/icons";
 import { Badge, Button, EmptyState, Skeleton, dayjs } from "@databuddy/ui";
+import { showErrorToast } from "@/lib/user-facing-error";
 
 interface InvitationData {
 	email: string;
@@ -134,15 +137,13 @@ function InvitationDetails({
 						<div
 							className={cn(
 								"flex size-10 shrink-0 items-center justify-center rounded",
-								isExpiringSoon ? "bg-amber-500/10" : "bg-secondary"
+								isExpiringSoon ? "bg-warning/10" : "bg-secondary"
 							)}
 						>
 							<ClockIcon
 								className={cn(
 									"size-5",
-									isExpiringSoon
-										? "text-amber-600 dark:text-amber-400"
-										: "text-accent-foreground"
+									isExpiringSoon ? "text-warning" : "text-accent-foreground"
 								)}
 							/>
 						</div>
@@ -170,7 +171,7 @@ function InvitationDetails({
 						) : (
 							<>
 								<UserPlusIcon className="size-4" />
-								Join Organization
+								Join organization
 							</>
 						)}
 					</Button>
@@ -179,7 +180,7 @@ function InvitationDetails({
 						onClick={onDeclineAction}
 						variant="secondary"
 					>
-						Maybe Later
+						Maybe later
 					</Button>
 				</div>
 			</div>
@@ -194,7 +195,7 @@ function SuccessState({ organizationName }: { organizationName: string }) {
 		<div className="flex flex-1 items-center justify-center p-4 sm:p-8">
 			<div className="w-full max-w-md space-y-6 text-center">
 				<div className="flex justify-center">
-					<div className="rounded border border-green-500/20 bg-green-500/10 p-4">
+					<div className="rounded bg-success/10 p-4">
 						<CheckCircleIcon className="size-8 text-success" />
 					</div>
 				</div>
@@ -209,7 +210,7 @@ function SuccessState({ organizationName }: { organizationName: string }) {
 				</div>
 
 				<Button className="gap-2" onClick={() => router.push("/websites")}>
-					Go to Dashboard
+					Go to dashboard
 					<ArrowRightIcon className="size-4" />
 				</Button>
 			</div>
@@ -223,12 +224,12 @@ function ExpiredState() {
 	return (
 		<EmptyState
 			action={{
-				label: "Back to Home",
+				label: "Back to home",
 				onClick: () => router.push("/websites"),
 			}}
-			description="This invitation has expired or is no longer valid. Please contact the organization admin for a new invitation."
+			description="This invitation has expired or is no longer valid. Contact the organization admin for a new invitation."
 			icon={<XCircleIcon />}
-			title="Invitation Expired"
+			title="Invitation expired"
 			variant="error"
 		/>
 	);
@@ -244,12 +245,12 @@ function AlreadyMemberState({
 	return (
 		<EmptyState
 			action={{
-				label: "Go to Dashboard",
+				label: "Go to dashboard",
 				onClick: () => router.push("/websites"),
 			}}
 			description={`You're already a member of ${organizationName}.`}
 			icon={<CheckCircleIcon />}
-			title="Already a Member"
+			title="Already a member"
 			variant="minimal"
 		/>
 	);
@@ -261,7 +262,7 @@ function ErrorState({ message }: { message: string }) {
 	return (
 		<EmptyState
 			action={{
-				label: "Back to Home",
+				label: "Back to home",
 				onClick: () => router.push("/websites"),
 			}}
 			description={message}
@@ -315,11 +316,13 @@ export default function AcceptInvitationPage() {
 
 		if (result.data) {
 			setActionStatus("success");
+			trackAppEvent(APP_EVENTS.invitationAccepted, { role: invitation.role });
 			queryClient.invalidateQueries({
 				queryKey: orpc.organizations.getUserPendingInvitations.key(),
 			});
 		} else {
 			setActionStatus("idle");
+			showErrorToast(result.error, "Failed to accept invitation");
 		}
 	}, [invitation, invitationId, queryClient]);
 

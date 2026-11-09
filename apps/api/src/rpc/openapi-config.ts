@@ -1,4 +1,5 @@
 import type { AppRouter } from "@databuddy/rpc";
+import type { OpenAPI } from "@orpc/openapi";
 
 export const PUBLIC_OPENAPI_ROUTERS = [
 	"alarms",
@@ -31,7 +32,7 @@ export const OPENAPI_DESCRIPTION = `REST API for Databuddy analytics, link manag
 **API Key usage:**
 - Send in the \`x-api-key\` header, or
 - Send as a Bearer token in the \`Authorization\` header: \`Authorization: Bearer <your-api-key>\`
-- API keys must be scoped to an organization. Create keys in the dashboard under Organization -> API Keys.
+- API keys must be scoped to an organization. Create keys in the dashboard under Organization → API Keys.
 
 **Scope requirements:** Some endpoints require specific API key scopes. Check each operation's \`x-required-scopes\` for requirements. Session authentication does not use scopes; access is determined by organization membership and role.
 
@@ -47,9 +48,9 @@ export const API_KEY_DESCRIPTION = `API key for programmatic access. Use instead
 
 **Available scopes:** ${AVAILABLE_API_SCOPES}
 
-**Creating keys:** Keys are created in the dashboard (Organization -> API Keys) and must be scoped to an organization. Store the secret securely; it is shown only once.`;
+**Creating keys:** Keys are created in the dashboard (Organization → API Keys) and must be scoped to an organization. Store the secret securely; it is shown only once.`;
 
-export const OPENAPI_TAGS = [
+export const OPENAPI_TAGS: OpenAPI.TagObject[] = [
 	{
 		name: "Alarms",
 		description:
@@ -125,4 +126,4 @@ export const OPENAPI_TAGS = [
 		description:
 			"Website management: create, list, update, delete websites; transfer between organizations; configure settings, tracking, and data export.",
 	},
-] as const;
+];

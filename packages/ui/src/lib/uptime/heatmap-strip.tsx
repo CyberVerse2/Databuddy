@@ -1,13 +1,11 @@
 "use client";
 
-import type {
-	KeyboardEvent as ReactKeyboardEvent,
-	PointerEvent as ReactPointerEvent,
-} from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../utils";
 import type { UptimeHeatmapDay } from "./heatmap-days";
+import { formatMs } from "./latency-chart-data";
 
 type UptimeSeverity =
 	| "empty"
@@ -29,13 +27,12 @@ interface Segment {
 	start: number;
 }
 
-export interface UptimeHeatmapStripProps {
+interface UptimeHeatmapStripProps {
 	days: UptimeHeatmapDay[];
 	emptyLabel: string;
 	interactive: boolean;
 	isActive: boolean;
 	stripClassName?: string;
-	tooltipHasData?: (day: UptimeHeatmapDay) => boolean;
 }
 
 const TOOLTIP_WIDTH = 224;
@@ -44,19 +41,12 @@ const TOOLTIP_HIDE_MS = 150;
 const TOOLTIP_Z_INDEX = 2_147_483_647;
 
 const SEGMENT_COLORS: Record<UptimeSeverity, string> = {
-	empty: "color-mix(in oklab, var(--muted) 78%, var(--foreground) 14%)",
-	operational: "#06c652",
-	degraded: "#fbbf24",
-	partial: "#fb8f24",
-	major: "#ff2b3c",
-};
-
-const SEGMENT_HEIGHTS: Record<UptimeSeverity, string> = {
-	empty: "h-1.5",
-	operational: "h-1.5",
-	degraded: "h-2",
-	partial: "h-2.5",
-	major: "h-3",
+	empty:
+		"var(--uptime-empty, color-mix(in oklab, var(--muted) 78%, var(--foreground) 14%))",
+	operational: "var(--uptime-operational, #06c652)",
+	degraded: "var(--uptime-degraded, #fbbf24)",
+	partial: "var(--uptime-partial, #fb8f24)",
+	major: "var(--uptime-major, #ff2b3c)",
 };
 
 function tintStatusColor(color: string, amount: number) {
@@ -70,7 +60,7 @@ const SEVERITY_META: Record<
 	empty: {
 		accent: "var(--muted-foreground)",
 		background: tintStatusColor("var(--muted-foreground)", 14),
-		label: "No Data",
+		label: "No data",
 	},
 	operational: {
 		accent: SEGMENT_COLORS.operational,
@@ -80,17 +70,17 @@ const SEVERITY_META: Record<
 	degraded: {
 		accent: SEGMENT_COLORS.degraded,
 		background: tintStatusColor(SEGMENT_COLORS.degraded, 20),
-		label: "Degraded Performance",
+		label: "Degraded",
 	},
 	partial: {
 		accent: SEGMENT_COLORS.partial,
 		background: tintStatusColor(SEGMENT_COLORS.partial, 18),
-		label: "Partial Outage",
+		label: "Partial outage",
 	},
 	major: {
 		accent: SEGMENT_COLORS.major,
 		background: tintStatusColor(SEGMENT_COLORS.major, 16),
-		label: "Major Outage",
+		label: "Major outage",
 	},
 };
 
@@ -153,21 +143,12 @@ function formatDowntime(seconds: number): string {
 	return `${hours} hr${hours === 1 ? "" : "s"} ${remainingMinutes} min${remainingMinutes === 1 ? "" : "s"}`;
 }
 
-function getOrdinalSuffix(day: number) {
-	if (day >= 11 && day <= 13) {
-		return "th";
-	}
-	switch (day % 10) {
-		case 1:
-			return "st";
-		case 2:
-			return "nd";
-		case 3:
-			return "rd";
-		default:
-			return "th";
-	}
-}
+const ORDINAL_RULES = new Intl.PluralRules("en-US", { type: "ordinal" });
+const ORDINAL_SUFFIXES: Partial<Record<Intl.LDMLPluralRule, string>> = {
+	one: "st",
+	two: "nd",
+	few: "rd",
+};
 
 function formatLongDate(date: Date): string {
 	const day = date.getUTCDate();
@@ -175,7 +156,7 @@ function formatLongDate(date: Date): string {
 	return `${date.toLocaleDateString("en-US", {
 		month: "long",
 		timeZone: "UTC",
-	})} ${day}${getOrdinalSuffix(day)} ${date.getUTCFullYear()}`;
+	})} ${day}${ORDINAL_SUFFIXES[ORDINAL_RULES.select(day)] ?? "th"} ${date.getUTCFullYear()}`;
 }
 
 function getTooltipTransform(state: TooltipState, isVisible: boolean) {
@@ -198,15 +179,14 @@ function SegmentTooltip({
 	isActive,
 	isVisible,
 	state,
-	showData,
 }: {
 	day: UptimeHeatmapDay;
 	emptyLabel: string;
 	isActive: boolean;
 	isVisible: boolean;
-	showData: boolean;
 	state: TooltipState;
 }) {
+	const showData = isActive && day.hasData;
 	const severity = getSeverity(day, isActive);
 	const meta = SEVERITY_META[severity];
 	const downtimeLabel =
@@ -253,22 +233,24 @@ function SegmentTooltip({
 						{downtimeLabel} downtime recorded
 					</p>
 				) : null}
+				{showData &&
+				(day.avgResponseTime !== null || day.p95ResponseTime !== null) ? (
+					<p className="mt-2 text-muted-foreground text-xs tabular-nums leading-[1.2]">
+						{[
+							day.avgResponseTime === null
+								? null
+								: `${formatMs(day.avgResponseTime)} avg`,
+							day.p95ResponseTime === null
+								? null
+								: `${formatMs(day.p95ResponseTime)} p95`,
+						]
+							.filter(Boolean)
+							.join(" · ")}{" "}
+						response time
+					</p>
+				) : null}
 			</div>
 		</div>
-	);
-}
-
-function getActiveSegmentOffset(segment: Segment, activeIndex: number) {
-	return ((activeIndex + 1 - segment.start) / segment.length) * 100;
-}
-
-function getHoveredIndex(rect: DOMRect, pointerX: number, itemCount: number) {
-	const cellWidth = rect.width / itemCount;
-
-	return clamp(
-		Math.floor((pointerX - rect.left) / cellWidth),
-		0,
-		itemCount - 1
 	);
 }
 
@@ -315,12 +297,14 @@ function getRangeSummary(days: UptimeHeatmapDay[], isActive: boolean): string {
 
 	const parts = (
 		["major", "partial", "degraded", "operational", "empty"] as const
-	)
-		.filter((severity) => counts.get(severity))
-		.map((severity) => {
-			const count = counts.get(severity) as number;
-			return `${count} ${count === 1 ? "day" : "days"} ${SEVERITY_META[severity].label.toLowerCase()}`;
-		});
+	).flatMap((severity) => {
+		const count = counts.get(severity);
+		return count
+			? [
+					`${count} ${count === 1 ? "day" : "days"} ${SEVERITY_META[severity].label.toLowerCase()}`,
+				]
+			: [];
+	});
 
 	return `Uptime history for the last ${days.length} days, oldest first: ${parts.join(", ")}. Use the arrow keys to review each day.`;
 }
@@ -346,7 +330,6 @@ export function UptimeHeatmapStrip({
 	isActive,
 	stripClassName,
 	emptyLabel,
-	tooltipHasData,
 }: UptimeHeatmapStripProps) {
 	const gridRef = useRef<HTMLFieldSetElement>(null);
 	const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -355,126 +338,82 @@ export function UptimeHeatmapStrip({
 	const [tooltip, setTooltip] = useState<TooltipState | null>(null);
 	const [isTooltipVisible, setIsTooltipVisible] = useState(false);
 	const [focusedIndex, setFocusedIndex] = useState(0);
-	const segments = useMemo(
-		() => buildSegments(days, isActive),
-		[days, isActive]
-	);
-	const dayLabels = useMemo(
-		() => days.map((day) => getSegmentDayLabel(day, emptyLabel, isActive)),
-		[days, emptyLabel, isActive]
-	);
-	const rangeSummary = useMemo(
-		() => getRangeSummary(days, isActive),
-		[days, isActive]
-	);
 	const activeDay = tooltip ? days[tooltip.index] : null;
-	const gridStyle = useMemo(
-		() => ({
-			gridTemplateColumns: `repeat(${days.length}, minmax(0, 1fr))`,
-		}),
-		[days.length]
-	);
+	const gridStyle = {
+		gridTemplateColumns: `repeat(${days.length}, minmax(0, 1fr))`,
+	};
 	const gridClassName =
 		stripClassName ??
 		"relative -my-3 grid cursor-pointer gap-x-px border-0 px-0 py-3 sm:gap-x-[2px]";
 
-	const clearHideTimer = useCallback(() => {
+	const clearHideTimer = () => {
 		if (hideTimerRef.current) {
 			clearTimeout(hideTimerRef.current);
 			hideTimerRef.current = null;
 		}
-	}, []);
+	};
 
-	const hideTooltip = useCallback(() => {
+	const hideTooltip = () => {
 		clearHideTimer();
 		rectRef.current = null;
 		setIsTooltipVisible(false);
 		hideTimerRef.current = setTimeout(() => {
 			setTooltip(null);
 		}, TOOLTIP_HIDE_MS);
-	}, [clearHideTimer]);
+	};
 
-	const measureGrid = useCallback(() => {
-		const grid = gridRef.current;
-		rectRef.current = grid ? grid.getBoundingClientRect() : null;
+	const measureGrid = () => {
+		rectRef.current = gridRef.current?.getBoundingClientRect() ?? null;
 		return rectRef.current;
-	}, []);
+	};
 
-	const showTooltipAt = useCallback(
-		(index: number, rect: DOMRect) => {
-			clearHideTimer();
-			setTooltip((previous) =>
-				previous?.index === index
-					? previous
-					: getTooltipPlacement({
-							index,
-							itemCount: days.length,
-							rect,
-							viewportHeight: window.innerHeight,
-							viewportWidth: window.innerWidth,
-						})
-			);
-			setIsTooltipVisible(true);
-		},
-		[clearHideTimer, days.length]
-	);
+	const showTooltipAt = (index: number, rect: DOMRect | null) => {
+		if (!(rect && days.length > 0)) {
+			return;
+		}
+		clearHideTimer();
+		setTooltip((previous) =>
+			previous?.index === index
+				? previous
+				: getTooltipPlacement({
+						index,
+						itemCount: days.length,
+						rect,
+						viewportHeight: window.innerHeight,
+						viewportWidth: window.innerWidth,
+					})
+		);
+		setIsTooltipVisible(true);
+	};
 
-	const handlePointerMove = useCallback(
-		(event: ReactPointerEvent<HTMLFieldSetElement>) => {
-			const rect = rectRef.current ?? measureGrid();
+	const handleDayKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+		const lastIndex = days.length - 1;
+		const nextIndex = {
+			ArrowRight: Math.min(focusedIndex + 1, lastIndex),
+			ArrowLeft: Math.max(focusedIndex - 1, 0),
+			Home: 0,
+			End: lastIndex,
+		}[event.key];
 
-			if (!(rect && days.length > 0)) {
-				return;
-			}
+		if (nextIndex === undefined) {
+			return;
+		}
 
-			showTooltipAt(getHoveredIndex(rect, event.clientX, days.length), rect);
-		},
-		[days.length, measureGrid, showTooltipAt]
-	);
-
-	const handleDayFocus = useCallback(
-		(index: number) => {
-			setFocusedIndex(index);
-			const rect = measureGrid();
-
-			if (!(rect && days.length > 0)) {
-				return;
-			}
-
-			showTooltipAt(index, rect);
-		},
-		[days.length, measureGrid, showTooltipAt]
-	);
-
-	const handleDayKeyDown = useCallback(
-		(event: ReactKeyboardEvent<HTMLButtonElement>) => {
-			const lastIndex = days.length - 1;
-			const nextIndex = {
-				ArrowRight: Math.min(focusedIndex + 1, lastIndex),
-				ArrowLeft: Math.max(focusedIndex - 1, 0),
-				Home: 0,
-				End: lastIndex,
-			}[event.key];
-
-			if (nextIndex === undefined) {
-				return;
-			}
-
-			event.preventDefault();
-			dayRefs.current[nextIndex]?.focus();
-		},
-		[days.length, focusedIndex]
-	);
+		event.preventDefault();
+		dayRefs.current[nextIndex]?.focus();
+	};
 
 	useEffect(
 		() => () => {
-			clearHideTimer();
+			if (hideTimerRef.current) {
+				clearTimeout(hideTimerRef.current);
+			}
 		},
-		[clearHideTimer]
+		[]
 	);
 
-	const segmentNodes = segments.map((segment) => {
-		const activeIndex = tooltip?.index ?? null;
+	const activeIndex = tooltip?.index ?? null;
+	const segmentNodes = buildSegments(days, isActive).map((segment) => {
 		const containsActive =
 			activeIndex !== null &&
 			activeIndex + 1 >= segment.start &&
@@ -483,10 +422,7 @@ export function UptimeHeatmapStrip({
 		return (
 			<div
 				aria-hidden
-				className={cn(
-					"relative overflow-hidden rounded-full",
-					SEGMENT_HEIGHTS[segment.severity]
-				)}
+				className="relative h-1.5 overflow-hidden rounded-full"
 				key={`${segment.start}-${segment.length}-${segment.severity}`}
 				style={{
 					background: SEGMENT_COLORS[segment.severity],
@@ -501,7 +437,7 @@ export function UptimeHeatmapStrip({
 						left:
 							activeIndex === null
 								? 0
-								: `${getActiveSegmentOffset(segment, activeIndex)}%`,
+								: `${((activeIndex + 1 - segment.start) / segment.length) * 100}%`,
 						opacity: containsActive && isTooltipVisible ? 1 : 0,
 						width: `${100 / segment.length}%`,
 					}}
@@ -521,18 +457,28 @@ export function UptimeHeatmapStrip({
 		);
 	}
 
-	const showData = activeDay
-		? (tooltipHasData?.(activeDay) ?? (isActive && activeDay.hasData))
-		: false;
-
 	return (
 		<>
 			<fieldset
-				aria-label={rangeSummary}
+				aria-label={getRangeSummary(days, isActive)}
 				className={cn("relative grid items-end", gridClassName)}
 				onPointerEnter={measureGrid}
 				onPointerLeave={hideTooltip}
-				onPointerMove={handlePointerMove}
+				onPointerMove={(event) => {
+					const rect = rectRef.current ?? measureGrid();
+					if (rect) {
+						showTooltipAt(
+							clamp(
+								Math.floor(
+									(event.clientX - rect.left) / (rect.width / days.length)
+								),
+								0,
+								days.length - 1
+							),
+							rect
+						);
+					}
+				}}
 				ref={gridRef}
 				style={gridStyle}
 			>
@@ -543,11 +489,14 @@ export function UptimeHeatmapStrip({
 				>
 					{days.map((day, index) => (
 						<button
-							aria-label={dayLabels[index]}
+							aria-label={getSegmentDayLabel(day, emptyLabel, isActive)}
 							className="h-full rounded-full bg-transparent outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
 							key={day.dateStr}
 							onBlur={hideTooltip}
-							onFocus={() => handleDayFocus(index)}
+							onFocus={() => {
+								setFocusedIndex(index);
+								showTooltipAt(index, measureGrid());
+							}}
 							onKeyDown={handleDayKeyDown}
 							ref={(node) => {
 								dayRefs.current[index] = node;
@@ -558,14 +507,13 @@ export function UptimeHeatmapStrip({
 					))}
 				</div>
 			</fieldset>
-			{typeof document !== "undefined" && activeDay && tooltip
+			{activeDay && tooltip
 				? createPortal(
 						<SegmentTooltip
 							day={activeDay}
 							emptyLabel={emptyLabel}
 							isActive={isActive}
 							isVisible={isTooltipVisible}
-							showData={showData}
 							state={tooltip}
 						/>,
 						document.body

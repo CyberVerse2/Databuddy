@@ -6,7 +6,9 @@ import {
 	getAccessibleWebsiteIds,
 	getApiKeyFromHeader,
 	hasGlobalAccess,
+	hasKeyAnyScope,
 	hasKeyScope,
+	hasWebsiteScope,
 	hasWebsiteScopeForOrganization,
 	isApiKeyPresent,
 } from "@databuddy/api-keys/resolve";
@@ -22,24 +24,17 @@ import {
 import { validateTimezone } from "@databuddy/validation";
 import { readBooleanEnv } from "@databuddy/env/app";
 import { getRateLimitHeaders, ratelimit } from "@databuddy/redis/rate-limit";
-import { getBillingOwner } from "@databuddy/rpc/billing";
-import { getOrganizationOwnerId } from "@databuddy/rpc/organization";
-import {
-	type GatedFeatureId,
-	GATED_FEATURES,
-	getFeatureUnavailableMessage,
-	getNextPlanForFeature,
-	isFeatureAvailable,
-} from "@databuddy/shared/types/features";
 import {
 	allowedFilterFields,
 	compileQuery,
 	executeBatch,
 	isFilterFieldAllowed,
+	queryPlanGateError,
 	truncateQueryErrorForLog,
 } from "@databuddy/ai/query";
 import {
 	canReadQueryTypesPublicly,
+	getQueryBuilder,
 	QueryBuilders,
 } from "@databuddy/ai/query/builders";
 import {
@@ -49,10 +44,7 @@ import {
 import type { Filter, QueryRequest } from "@databuddy/ai/query/types";
 import { Elysia, t } from "elysia";
 import { getAccessibleWebsites } from "@databuddy/ai/lib/accessible-websites";
-import {
-	getCachedWebsiteDomain,
-	getWebsiteDomain,
-} from "@databuddy/ai/lib/website-utils";
+import { getWebsiteDomain } from "@databuddy/ai/lib/website-utils";
 import { resolveDatePreset } from "@databuddy/ai/lib/date-presets";
 import { captureError, mergeWideEvent } from "@databuddy/ai/lib/tracing";
 import {
@@ -64,6 +56,7 @@ import {
 } from "../schemas/query-schemas";
 import { handleAppError } from "../http/errors";
 import { getRequestId } from "../http/request-id";
+import { getResolvedAuth } from "../lib/auth-wide-event";
 
 const PER_WEBSITE_QUERY_CONCURRENCY = 8;
 
@@ -197,7 +190,7 @@ function validateQueryParameters(
 	const queryTypes = Object.keys(QueryBuilders);
 	return parameters.flatMap((param, index) => {
 		const name = typeof param === "string" ? param : param?.name;
-		if (!(name && !QueryBuilders[name])) {
+		if (!(name && !getQueryBuilder(name))) {
 			return [];
 		}
 
@@ -295,14 +288,21 @@ function validatePaginationFields(
 	request: DynamicQueryRequestType
 ): ValidationError[] {
 	const errors: ValidationError[] = [];
-	if (request.limit !== undefined && request.limit < 1) {
-		errors.push({ field: "limit", message: "Limit must be at least 1" });
+	if (request.limit !== undefined) {
+		if (!Number.isInteger(request.limit)) {
+			errors.push({ field: "limit", message: "Limit must be an integer" });
+		} else if (request.limit < 1) {
+			errors.push({ field: "limit", message: "Limit must be at least 1" });
+		} else if (request.limit > 10_000) {
+			errors.push({ field: "limit", message: "Limit cannot exceed 10000" });
+		}
 	}
-	if (request.limit !== undefined && request.limit > 10_000) {
-		errors.push({ field: "limit", message: "Limit cannot exceed 10000" });
-	}
-	if (request.page !== undefined && request.page < 1) {
-		errors.push({ field: "page", message: "Page must be at least 1" });
+	if (request.page !== undefined) {
+		if (!Number.isInteger(request.page)) {
+			errors.push({ field: "page", message: "Page must be an integer" });
+		} else if (request.page < 1) {
+			errors.push({ field: "page", message: "Page must be at least 1" });
+		}
 	}
 	return errors;
 }
@@ -437,56 +437,6 @@ async function getOrganizationWebsiteIds(
 	});
 
 	return websites.map((website) => website.id);
-}
-
-const FEATURE_GATED_QUERY_TYPES: Record<string, GatedFeatureId> = {
-	recent_errors: GATED_FEATURES.ERROR_TRACKING,
-	error_types: GATED_FEATURES.ERROR_TRACKING,
-	errors_by_page: GATED_FEATURES.ERROR_TRACKING,
-	error_summary: GATED_FEATURES.ERROR_TRACKING,
-	error_chart_data: GATED_FEATURES.ERROR_TRACKING,
-	error_trends: GATED_FEATURES.ERROR_TRACKING,
-	error_frequency: GATED_FEATURES.ERROR_TRACKING,
-	errors_by_type: GATED_FEATURES.ERROR_TRACKING,
-};
-
-async function enforceFeatureGatesForQueryTypes(
-	queryTypes: string[],
-	website: { organizationId: string | null }
-): Promise<{ error: string; feature: GatedFeatureId } | null> {
-	if (readBooleanEnv("SELFHOST")) {
-		return null;
-	}
-	const required = new Set<GatedFeatureId>();
-	for (const type of queryTypes) {
-		const feature = FEATURE_GATED_QUERY_TYPES[type];
-		if (feature) {
-			required.add(feature);
-		}
-	}
-	if (required.size === 0) {
-		return null;
-	}
-
-	const ownerId = website.organizationId
-		? await getOrganizationOwnerId(website.organizationId)
-		: null;
-	const planId = ownerId
-		? (await getBillingOwner(ownerId, website.organizationId)).planId
-		: null;
-
-	for (const feature of required) {
-		if (!isFeatureAvailable(planId, feature)) {
-			return {
-				error: getFeatureUnavailableMessage(
-					feature,
-					getNextPlanForFeature(planId, feature)
-				),
-				feature,
-			};
-		}
-	}
-	return null;
 }
 
 function extractQueryTypes(
@@ -913,7 +863,6 @@ async function executeDynamicQuery(
 	projectId: string,
 	projectType: ProjectType,
 	timezone: string,
-	domainCache?: Record<string, string | null>,
 	scope?: { organizationWebsiteIds?: string[] }
 ): Promise<{
 	queryId: string;
@@ -927,12 +876,11 @@ async function executeDynamicQuery(
 	};
 }> {
 	const { startDate: from, endDate: to } = request;
+	const limit = request.limit ?? 100;
+	const page = request.page ?? 1;
 
 	const domain =
-		projectType === "website"
-			? (domainCache?.[projectId] ??
-				(await getWebsiteDomain(projectId).catch(() => null)))
-			: null;
+		projectType === "website" ? await getWebsiteDomain(projectId) : null;
 	const organizationWebsiteIds =
 		projectType === "organization"
 			? (scope?.organizationWebsiteIds ?? [])
@@ -990,9 +938,15 @@ async function executeDynamicQuery(
 		const paramFrom = start ? normalizeDate(start) : from;
 		const paramTo = end ? normalizeDate(end) : to;
 
-		const config = QueryBuilders[name];
+		const config = getQueryBuilder(name);
 		if (!config) {
 			return { id, error: `Unknown query type: ${name}` };
+		}
+		if (
+			projectType === "organization" &&
+			config.meta?.category === "AI Agents"
+		) {
+			return { id, error: `${name} is only supported for website queries` };
 		}
 
 		if (traitError) {
@@ -1040,8 +994,8 @@ async function executeDynamicQuery(
 				filters: effectiveFilters.filter((f) =>
 					isFilterFieldAllowed(config, f.field)
 				),
-				limit: request.limit || 100,
-				offset: request.page ? (request.page - 1) * (request.limit || 100) : 0,
+				limit,
+				offset: (page - 1) * limit,
 				timezone,
 				organizationWebsiteIds: isOrgCustomEvents
 					? (organizationWebsiteIds ?? [])
@@ -1143,8 +1097,8 @@ async function executeDynamicQuery(
 		meta: {
 			parameters: request.parameters as (string | Record<string, unknown>)[],
 			total_parameters: request.parameters.length,
-			page: request.page || 1,
-			limit: request.limit || 100,
+			page,
+			limit,
 			filters_applied: request.filters?.length || 0,
 		},
 	};
@@ -1152,17 +1106,31 @@ async function executeDynamicQuery(
 
 export const query = new Elysia({ prefix: "/v1/query" })
 	.derive(async ({ request }): Promise<{ auth: AuthContext }> => {
+		const preResolved = getResolvedAuth(request.headers);
 		const hasApiKey = isApiKeyPresent(request.headers);
-		const [apiKey, session] = await Promise.all([
-			hasApiKey ? getApiKeyFromHeader(request.headers) : null,
-			auth.api.getSession({ headers: request.headers }),
-		]);
+
+		let apiKey: ApiKeyRow | null;
+		let session: Awaited<ReturnType<typeof auth.api.getSession>> | null;
+
+		if (preResolved) {
+			session = preResolved.session;
+			apiKey = preResolved.apiKeyResult?.key ?? null;
+		} else {
+			[apiKey, session] = await Promise.all([
+				hasApiKey ? getApiKeyFromHeader(request.headers) : null,
+				auth.api.getSession({ headers: request.headers }).catch(() => null),
+			]);
+		}
+
 		const user = session?.user ?? null;
 
 		if (
 			apiKey &&
 			!(
-				hasKeyScope(apiKey, "read:data") || hasKeyScope(apiKey, "read:monitors")
+				hasKeyAnyScope(apiKey, ["read:data", "read:monitors"]) ||
+				getAccessibleWebsiteIds(apiKey).some((id) =>
+					hasWebsiteScope(apiKey, id, "read:data")
+				)
 			)
 		) {
 			return {
@@ -1340,12 +1308,13 @@ export const query = new Elysia({ prefix: "/v1/query" })
 					return rateLimited;
 				}
 
+				const queryTypes = extractQueryTypes(body);
 				const accessResult = await resolveProjectAccess(ctx, {
 					websiteId: q.website_id,
 					scheduleId: q.schedule_id,
 					linkId: q.link_id,
 					organizationId: q.organization_id,
-					queryTypes: extractQueryTypes(body),
+					queryTypes,
 				});
 
 				if (!accessResult.success) {
@@ -1357,25 +1326,23 @@ export const query = new Elysia({ prefix: "/v1/query" })
 					);
 				}
 
-				if (accessResult.projectType === "website" && q.website_id) {
-					const queryTypes = extractQueryTypes(body);
-					const website = await db.query.websites.findFirst({
-						where: { id: q.website_id },
-						columns: { organizationId: true },
-					});
-					if (website) {
-						const gateFail = await enforceFeatureGatesForQueryTypes(
-							queryTypes,
-							website
+				if (
+					accessResult.projectType === "website" ||
+					accessResult.projectType === "organization"
+				) {
+					const planError = await queryPlanGateError(
+						queryTypes,
+						accessResult.projectType === "website"
+							? { websiteId: accessResult.projectId }
+							: { organizationId: accessResult.projectId }
+					);
+					if (planError) {
+						return createErrorResponse(
+							planError,
+							"FEATURE_UNAVAILABLE",
+							402,
+							requestId
 						);
-						if (gateFail) {
-							return createErrorResponse(
-								gateFail.error,
-								"FEATURE_UNAVAILABLE",
-								402,
-								requestId
-							);
-						}
 					}
 				}
 
@@ -1413,7 +1380,6 @@ export const query = new Elysia({ prefix: "/v1/query" })
 						}
 					}
 
-					const cache = await getCachedWebsiteDomain([]);
 					const results = await Promise.all(
 						body.map((req) => {
 							const validation = validateQueryRequest(req, timezone);
@@ -1424,8 +1390,8 @@ export const query = new Elysia({ prefix: "/v1/query" })
 									meta: {
 										parameters: req.parameters,
 										total_parameters: req.parameters.length,
-										page: req.page || 1,
-										limit: req.limit || 100,
+										page: req.page ?? 1,
+										limit: req.limit ?? 100,
 										filters_applied: req.filters?.length || 0,
 									},
 								};
@@ -1440,7 +1406,6 @@ export const query = new Elysia({ prefix: "/v1/query" })
 								accessResult.projectId,
 								accessResult.projectType,
 								timezone,
-								cache,
 								organizationScope
 							).catch((error) => {
 								captureError(error, {
@@ -1461,8 +1426,8 @@ export const query = new Elysia({ prefix: "/v1/query" })
 									meta: {
 										parameters: req.parameters,
 										total_parameters: req.parameters.length,
-										page: req.page || 1,
-										limit: req.limit || 100,
+										page: req.page ?? 1,
+										limit: req.limit ?? 100,
 										filters_applied: req.filters?.length || 0,
 									},
 								};
@@ -1491,7 +1456,6 @@ export const query = new Elysia({ prefix: "/v1/query" })
 						accessResult.projectId,
 						accessResult.projectType,
 						timezone,
-						undefined,
 						organizationScope
 					)),
 				};

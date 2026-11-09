@@ -1,20 +1,37 @@
+import type {
+	AiTrafficSpansInsert,
+	McpSpansInsert,
+} from "@databuddy/db/clickhouse/tables";
 import {
 	getWebsiteByIdV2,
 	isOriginAllowed,
 	resolveApiKeyOwnerId,
 } from "@hooks/auth";
 import {
+	API_KEY_DENIAL_ERRORS,
 	type ApiKeyRow,
-	getAccessibleWebsiteIds,
+	denyApiKeyWebsiteAccess,
 	getApiKeyFromHeader,
-	hasGlobalAccess,
 	hasKeyScope,
 } from "@lib/api-key";
 import { checkAutumnUsage } from "@lib/billing";
 import { parseCorsSafeJson } from "@lib/cors-safe-json";
 import { insertCustomEvents } from "@lib/event-service";
+import { runFork, runPromise, send, sendBatch } from "@lib/producer";
 import { ratelimit } from "@databuddy/redis/rate-limit";
+import { redis } from "@databuddy/redis/redis";
 import {
+	setupCheckKey,
+	setupCheckNonce,
+} from "@databuddy/shared/bot-detection/ai-agents";
+import {
+	BotCategory,
+	CONTENT_FORMATS,
+	contentFormat,
+	isAssetPath,
+} from "@databuddy/shared/bot-detection/types";
+import {
+	agentSpanColumns,
 	checkForBot,
 	getWebsiteSecuritySettings,
 } from "@lib/request-validation";
@@ -36,9 +53,312 @@ import {
 	VALIDATION_LIMITS,
 	validatePayloadSize,
 } from "@utils/validation";
+import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { Elysia } from "elysia";
 import { useLogger } from "evlog/elysia";
+import { z } from "zod";
 import { type TrackEventPayload, trackEventSchema } from "./track-event-schema";
+
+function truncated(maxLength: number) {
+	return z.string().transform((value) => value.slice(0, maxLength));
+}
+
+const agentHitSchema = z.object({
+	websiteId: z.string().min(1).max(128),
+	host: z.string().min(1).max(253),
+	path: truncated(2048),
+	format: z.enum(CONTENT_FORMATS).catch("html"),
+	userAgent: truncated(512),
+	accept: truncated(512).optional(),
+	signatureAgent: truncated(512).optional(),
+	referrer: truncated(2048).optional(),
+});
+
+const vercelLogSchema = z.object({
+	id: z.string().optional(),
+	requestId: z.string().optional(),
+	timestamp: z.number().optional(),
+	proxy: z.object({
+		host: z.string().min(1).max(253),
+		method: z.enum(["GET", "HEAD"]),
+		path: z.string(),
+		referer: truncated(2048).optional(),
+		statusCode: z.number().int().optional(),
+		timestamp: z.number().optional(),
+		userAgent: z.array(truncated(512)).optional(),
+	}),
+});
+
+const VERCEL_LOGS_MAX_BYTES = 10 * 1024 * 1024;
+const VERCEL_REQUEST_TTL_SECONDS = 6 * 3600 + 300;
+
+const uint32 = z.number().int().min(0).max(4_294_967_295);
+
+const mcpCallsSchema = z
+	.array(
+		z.object({
+			tool: truncated(256),
+			durationMs: uint32,
+			error: z.string().optional(),
+			errorCode: z.string().optional(),
+			outputChars: uint32.default(0),
+			sessionId: truncated(128).optional(),
+			clientName: truncated(128).optional(),
+			clientVersion: truncated(64).optional(),
+			serverName: truncated(128).optional(),
+			serverVersion: truncated(64).optional(),
+			userAgent: truncated(512).optional(),
+			timestamp: z.number().int().optional(),
+			websiteId: z.string().min(1).max(128).optional(),
+			environment: truncated(32).optional(),
+		})
+	)
+	.min(1)
+	.max(100);
+
+const MCP_CLIENT_PRODUCTS: Record<string, string> = {
+	"@librechat/api-client": "LibreChat",
+	"@n8n/n8n-nodes-langchain.mcpclienttool": "n8n",
+	"amp-mcp-client": "Amp",
+	"antigravity-client": "Google Antigravity",
+	chatgpt: "ChatGPT",
+	"cherry studio": "Cherry Studio",
+	"claude-ai": "Claude",
+	"claude-code": "Claude Code",
+	cline: "Cline",
+	codex: "Codex",
+	"codex-mcp-client": "Codex",
+	"com.raycast.macos": "Raycast",
+	"continue-cli-client": "Continue",
+	crush: "Crush",
+	"cursor-vscode": "Cursor",
+	"dust-mcp-client": "Dust",
+	"factory-cli": "Factory",
+	"gemini-cli-mcp-client": "Gemini CLI",
+	"github-copilot-developer": "GitHub Copilot CLI",
+	goose: "Goose",
+	"jan-streamable-client": "Jan",
+	"jetbrains-iu-copilot-intellij": "JetBrains AI Assistant",
+	"jetbrains-jbc-copilot-intellij": "JetBrains AI Assistant",
+	"kilo-code": "Kilo Code",
+	"lobehub-mcp-client": "LobeHub",
+	"make-app-mcp-client": "Make",
+	mistral: "Mistral Le Chat",
+	opencode: "OpenCode",
+	"postman-client": "Postman",
+	"roo-code": "Roo Code",
+	"visual studio code": "VS Code",
+	windsurf: "Windsurf",
+	"windsurf-client": "Windsurf",
+	"xcode-copilot-xcode": "GitHub Copilot for Xcode",
+	zed: "Zed",
+};
+
+const MCP_CLIENT_USER_AGENTS: [RegExp, string][] = [
+	[/claude-code\//i, "Claude Code"],
+	[/^Claude-User\b/i, "Claude"],
+	[/^codex-mcp-client\//i, "Codex"],
+	[/^Cursor\//, "Cursor"],
+	[/^openai-mcp\//i, "ChatGPT"],
+];
+
+const MCP_ERROR_PREFIX = /^MCP error (-?\d+): (.*)$/s;
+
+const NUMERIC_CODE = /^-?\d+$/;
+
+const MCP_VALIDATION_ERRORS: [RegExp, string][] = [
+	[/^(?:Input validation error|Invalid arguments for tool)/, "invalid_params"],
+	[/^Output validation error/, "invalid_output"],
+];
+
+const JSON_RPC_ERROR_CODES: Record<number, string> = {
+	[-32_700]: "parse_error",
+	[-32_600]: "invalid_request",
+	[-32_601]: "method_not_found",
+	[-32_602]: "invalid_params",
+	[-32_603]: "internal_error",
+	[-32_001]: "request_timeout",
+	[-32_000]: "connection_closed",
+	[-32_002]: "resource_not_found",
+	[-32_042]: "url_elicitation_required",
+};
+
+const mcpErrorBodySchema = z.union([
+	z
+		.object({ error: z.object({ message: z.string(), code: z.unknown() }) })
+		.transform(({ error }) => error),
+	z.object({ message: z.string(), code: z.unknown() }),
+	z
+		.object({ error: z.string() })
+		.transform(({ error }) => ({ message: error, code: undefined })),
+]);
+
+function mcpErrorCode(code: unknown): string | undefined {
+	const value =
+		typeof code === "string" && NUMERIC_CODE.test(code) ? Number(code) : code;
+	const name =
+		typeof value === "number"
+			? (JSON_RPC_ERROR_CODES[value] ?? String(value))
+			: value;
+	return typeof name === "string" && name ? name.slice(0, 64) : undefined;
+}
+
+function mcpFailure(text: string, errorCode: string | undefined) {
+	const rpc = MCP_ERROR_PREFIX.exec(text);
+	const unwrapped = rpc?.[2] ?? text;
+	let json: unknown;
+	if (unwrapped.startsWith("{")) {
+		try {
+			json = JSON.parse(unwrapped);
+		} catch {
+			json = undefined;
+		}
+	}
+	const body = mcpErrorBodySchema.safeParse(json).data;
+	const message = body?.message ?? unwrapped;
+	return {
+		code:
+			mcpErrorCode(errorCode) ??
+			mcpErrorCode(body?.code) ??
+			mcpErrorCode(rpc?.[1]) ??
+			MCP_VALIDATION_ERRORS.find(([pattern]) => pattern.test(message))?.[1],
+		message: message.slice(0, 512),
+	};
+}
+
+function mcpClient(clientName = "", userAgent = ""): string {
+	const name = clientName.toLowerCase();
+	return (
+		(Object.hasOwn(MCP_CLIENT_PRODUCTS, name)
+			? MCP_CLIENT_PRODUCTS[name]
+			: undefined) ??
+		MCP_CLIENT_USER_AGENTS.find(([pattern]) => pattern.test(userAgent))?.[1] ??
+		clientName
+	);
+}
+
+function parseVercelLogs(body: Uint8Array): {
+	entries: unknown[];
+	malformed: number;
+} {
+	const bytes =
+		body[0] === 0x1f && body[1] === 0x8b
+			? gunzipSync(body, { maxOutputLength: VERCEL_LOGS_MAX_BYTES })
+			: body;
+	const text = new TextDecoder().decode(bytes).trim();
+	if (text.startsWith("[")) {
+		const parsed: unknown = JSON.parse(text);
+		return { entries: Array.isArray(parsed) ? parsed : [], malformed: 0 };
+	}
+	let malformed = 0;
+	const entries = text.split("\n").flatMap((line) => {
+		if (!line.trim()) {
+			return [];
+		}
+		try {
+			return [JSON.parse(line)];
+		} catch {
+			malformed += 1;
+			return [];
+		}
+	});
+	return { entries, malformed };
+}
+
+const CLAIM_VERCEL_REQUEST_SCRIPT = `
+-- claim-vercel-request
+local current = redis.call("GET", KEYS[1])
+if current and not (ARGV[3] == "1" and string.sub(current, 1, 2) == "0:") then
+	return 0
+end
+redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+return 1
+`;
+
+const RELEASE_VERCEL_REQUEST_SCRIPT = `
+-- release-vercel-request
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+	return 0
+end
+return redis.call("DEL", KEYS[1])
+`;
+
+interface VercelRequestClaim {
+	key: string;
+	value: string;
+}
+
+function isServedStatus(status: number): boolean {
+	return status === 0 || status === 304 || (status >= 200 && status < 300);
+}
+
+async function claimVercelRequest(
+	websiteId: string,
+	requestKey: string,
+	status: number,
+	owner: string
+): Promise<VercelRequestClaim | null> {
+	if (requestKey === "") {
+		return { key: "", value: "" };
+	}
+	const key = `vercel-drain-request:${websiteId}:${createHash("sha256").update(requestKey).digest("base64url")}`;
+	const value = `${status}:${owner}`;
+	try {
+		const claimed = await redis.eval(
+			CLAIM_VERCEL_REQUEST_SCRIPT,
+			1,
+			key,
+			value,
+			VERCEL_REQUEST_TTL_SECONDS,
+			isServedStatus(status) ? "0" : "1"
+		);
+		return claimed === 1 ? { key, value } : null;
+	} catch {
+		return { key: "", value: "" };
+	}
+}
+
+async function releaseVercelRequests(
+	claims: VercelRequestClaim[]
+): Promise<void> {
+	await Promise.all(
+		claims
+			.filter((claim) => claim.key !== "")
+			.map((claim) =>
+				redis.eval(RELEASE_VERCEL_REQUEST_SCRIPT, 1, claim.key, claim.value)
+			)
+	);
+}
+
+async function loadHostCheck(websiteId: string) {
+	const website = await getWebsiteByIdV2(websiteId).catch(() => {
+		useLogger().set({ website_lookup: "unavailable" });
+	});
+	if (website === null) {
+		throw basketErrors.trackWebsiteNotFound();
+	}
+	if (!website) {
+		return { isHostAllowed: () => true, verification: "host_unchecked" };
+	}
+	const { allowedOrigins } = getWebsiteSecuritySettings(website.settings) ?? {};
+	return {
+		isHostAllowed: (host: string) =>
+			isOriginAllowed(`https://${host}`, website.domain, allowedOrigins),
+		verification: "",
+	};
+}
+
+async function recordedSetupCheck(
+	websiteId: string,
+	userAgent: string
+): Promise<boolean> {
+	const nonce = setupCheckNonce(userAgent);
+	if (nonce) {
+		await redis.set(setupCheckKey(websiteId, nonce), "1", "EX", 120);
+	}
+	return nonce !== null;
+}
 
 interface ResolvedAuth {
 	apiKey?: ApiKeyRow;
@@ -79,6 +399,15 @@ function parseTimestamp(
 		throw basketErrors.trackInvalidBody();
 	}
 	return timestamp;
+}
+
+function recentTimestamp(value: number | undefined, now: number): number {
+	return value !== undefined &&
+		Number.isSafeInteger(value) &&
+		value >= now - 6 * 3_600_000 &&
+		value <= now + 300_000
+		? value
+		: now;
 }
 
 async function enforceWebsiteSecurity(
@@ -140,22 +469,14 @@ async function enforceWebsiteSecurity(
 }
 
 function resolveAuth(
-	headers: Headers,
 	request: Request,
 	websiteIdParam?: string
 ): Promise<ResolvedAuth> {
 	return record("resolveAuth", async () => {
 		const log = useLogger();
-		const apiKey = await getApiKeyFromHeader(headers);
+		const apiKey = await getApiKeyFromHeader(request.headers);
 
 		if (apiKey) {
-			if (!hasKeyScope(apiKey, "track:events")) {
-				log.set({
-					auth: { ok: false, reason: "missing_scope", method: "api_key" },
-				});
-				throw basketErrors.trackMissingScope();
-			}
-
 			const ownerId = apiKey.organizationId ?? apiKey.userId;
 			if (!ownerId) {
 				log.set({
@@ -224,6 +545,33 @@ function resolveAuth(
 	});
 }
 
+async function apiKeyWebsiteDenial(
+	apiKey: ApiKeyRow,
+	targetIds: (string | undefined)[]
+): Promise<Error | undefined> {
+	const log = useLogger();
+	if (targetIds.some((id) => !id) && !hasKeyScope(apiKey, "track:events")) {
+		log.set({ rejected: "missing_scope" });
+		return basketErrors.trackMissingScope();
+	}
+	const websiteIds = [...new Set(targetIds.flatMap((id) => (id ? [id] : [])))];
+	log.set({ websiteIds });
+	const websites = await Promise.all(
+		websiteIds.map((id) => getWebsiteByIdV2(id))
+	);
+	for (const [i, websiteId] of websiteIds.entries()) {
+		const denial = denyApiKeyWebsiteAccess(
+			apiKey,
+			websiteId,
+			websites[i] ?? null
+		);
+		if (denial) {
+			log.set({ rejected: denial, targetWebsiteId: websiteId });
+			return API_KEY_DENIAL_ERRORS[denial]();
+		}
+	}
+}
+
 export const trackRoute = new Elysia()
 	.onParse(parseCorsSafeJson)
 	.post("/track", async ({ body, query, request }) => {
@@ -258,23 +606,23 @@ export const trackRoute = new Elysia()
 				: [parseResult.data];
 			const websiteIdParam = typedQuery.website_id || events[0]?.websiteId;
 
-			const auth = await resolveAuth(request.headers, request, websiteIdParam);
+			const auth = await resolveAuth(request, websiteIdParam);
 
 			const userAgent =
 				sanitizeString(
 					request.headers.get("user-agent"),
 					VALIDATION_LIMITS.STRING_MAX_LENGTH
 				) || "";
-			const botError = await checkForBot(
+			const botRejection = await checkForBot(
 				request,
 				typedBody,
 				typedQuery,
-				auth.websiteId ?? websiteIdParam ?? "",
+				websiteIdParam ?? "",
 				userAgent
 			);
-			if (botError) {
+			if (botRejection) {
 				log.set({ rejected: "bot" });
-				return botError.error;
+				return botRejection.response;
 			}
 
 			const targets = events.map((event) => ({
@@ -300,82 +648,25 @@ export const trackRoute = new Elysia()
 				throw basketErrors.trackRateLimited();
 			}
 
-			const allowedApiKeyWebsiteIds =
-				auth.apiKey && !hasGlobalAccess(auth.apiKey)
-					? new Set(getAccessibleWebsiteIds(auth.apiKey))
-					: null;
-
-			for (const target of targets) {
-				const targetId = target.websiteId;
-
-				if (auth.apiKey) {
-					if (allowedApiKeyWebsiteIds && !targetId) {
-						log.set({ rejected: "website_scope" });
-						captureRejectedBody();
-						throw basketErrors.trackWebsiteScopeMismatch();
-					}
-					if (
-						targetId &&
-						allowedApiKeyWebsiteIds &&
-						!allowedApiKeyWebsiteIds.has(targetId)
-					) {
-						log.set({ rejected: "website_scope", targetWebsiteId: targetId });
-						captureRejectedBody();
-						throw basketErrors.trackWebsiteScopeMismatch();
-					}
-					continue;
-				}
-
-				if (!targetId) {
-					captureRejectedBody();
-					throw basketErrors.trackInvalidBody();
-				}
-
-				if (auth.websiteId && targetId !== auth.websiteId) {
-					log.set({ rejected: "website_scope", targetWebsiteId: targetId });
-					captureRejectedBody();
-					throw basketErrors.trackWebsiteScopeMismatch();
-				}
-			}
-
 			if (auth.apiKey) {
-				const targetIds = [
-					...new Set(
-						targets.flatMap((target) =>
-							target.websiteId ? [target.websiteId] : []
-						)
-					),
-				];
-				const websites = await Promise.all(
-					targetIds.map((id) => getWebsiteByIdV2(id))
+				const denial = await apiKeyWebsiteDenial(
+					auth.apiKey,
+					targets.map((target) => target.websiteId)
 				);
-				for (const [i, website] of websites.entries()) {
-					if (!website) {
-						log.set({
-							rejected: "website_not_found",
-							targetWebsiteId: targetIds[i],
-						});
+				if (denial) {
+					captureRejectedBody();
+					throw denial;
+				}
+			} else {
+				for (const { websiteId } of targets) {
+					if (!websiteId) {
 						captureRejectedBody();
-						throw basketErrors.trackWebsiteNotFound();
+						throw basketErrors.trackInvalidBody();
 					}
-					if (
-						!auth.organizationId ||
-						website.organizationId !== auth.organizationId
-					) {
-						log.set({
-							rejected: "website_scope",
-							targetWebsiteId: targetIds[i],
-						});
+					if (auth.websiteId && websiteId !== auth.websiteId) {
+						log.set({ rejected: "website_scope", targetWebsiteId: websiteId });
 						captureRejectedBody();
 						throw basketErrors.trackWebsiteScopeMismatch();
-					}
-					if (website.status !== "ACTIVE") {
-						log.set({
-							rejected: "website_not_active",
-							targetWebsiteId: targetIds[i],
-						});
-						captureRejectedBody();
-						throw basketErrors.trackWebsiteNotFound();
 					}
 				}
 			}
@@ -420,4 +711,270 @@ export const trackRoute = new Elysia()
 		} catch (error) {
 			rethrowOrWrap(error, log);
 		}
+	})
+	.get(
+		"/ai-traffic/setup-check/:websiteId/:nonce",
+		async ({ params: { nonce, websiteId } }) => ({
+			recorded: (await redis.exists(setupCheckKey(websiteId, nonce))) === 1,
+		})
+	)
+	.post("/ai-traffic", async ({ body }) => {
+		const log = useLogger();
+		log.set({ route: "ai-traffic" });
+
+		try {
+			const parsed = agentHitSchema.safeParse(body);
+			if (!parsed.success) {
+				throw createIngestSchemaValidationError(parsed.error.issues);
+			}
+			const hit = parsed.data;
+			log.set({ websiteId: hit.websiteId, host: hit.host });
+
+			const hostCheck = await loadHostCheck(hit.websiteId);
+			if (!hostCheck.isHostAllowed(hit.host)) {
+				log.set({ rejected: "host_not_authorized" });
+				throw basketErrors.ingestOriginNotAuthorized();
+			}
+			if (await recordedSetupCheck(hit.websiteId, hit.userAgent)) {
+				return new Response(null, { status: 202 });
+			}
+
+			const columns = agentSpanColumns(hit);
+			log.set({
+				bot: {
+					name: columns.bot_name,
+					agent: columns.agent_id || null,
+					signed: Boolean(hit.signatureAgent),
+				},
+			});
+			runFork(
+				send("analytics-ai-traffic-spans", {
+					...columns,
+					client_id: hit.websiteId,
+					timestamp: Date.now(),
+					user_agent: hit.userAgent,
+					path: hit.path,
+					format: hit.format,
+					host: hit.host,
+					accept: hit.accept ?? "",
+					referrer: hit.referrer,
+					source: "middleware",
+					verification: hostCheck.verification,
+				} satisfies AiTrafficSpansInsert)
+			);
+
+			return new Response(null, { status: 202 });
+		} catch (error) {
+			rethrowOrWrap(error, log);
+		}
+	})
+	.post("/mcp", async ({ body, request }) => {
+		const log = useLogger();
+		log.set({ route: "mcp" });
+
+		try {
+			if (!validatePayloadSize(body)) {
+				log.set({ rejected: "payload_too_large" });
+				throw basketErrors.trackPayloadTooLarge();
+			}
+			const parsed = mcpCallsSchema.safeParse(body);
+			if (!parsed.success) {
+				throw createIngestSchemaValidationError(parsed.error.issues);
+			}
+			const calls = parsed.data;
+			const apiKey = await getApiKeyFromHeader(request.headers);
+			if (!apiKey) {
+				throw basketErrors.mcpInvalidApiKey();
+			}
+			const { organizationId } = apiKey;
+			if (!organizationId) {
+				throw basketErrors.trackMissingOwner();
+			}
+			log.set({ organizationId, count: calls.length });
+			const rl = await ratelimit(`mcp:apikey:${apiKey.id}`, 6000, 60);
+			if (!rl.success) {
+				log.set({ rejected: "rate_limit" });
+				throw basketErrors.trackRateLimited();
+			}
+			const denial = await apiKeyWebsiteDenial(
+				apiKey,
+				calls.map((call) => call.websiteId)
+			);
+			if (denial) {
+				throw denial;
+			}
+
+			const billingUserId = await resolveApiKeyOwnerId(organizationId);
+			if (!billingUserId) {
+				throw basketErrors.billingCheckUnavailable();
+			}
+			await checkAutumnUsage(
+				billingUserId,
+				"events",
+				{ api_route: "mcp", batch_size: calls.length },
+				calls.length
+			);
+
+			const now = Date.now();
+			runFork(
+				sendBatch(
+					"analytics-mcp-spans",
+					calls.map((call): McpSpansInsert => {
+						const failure =
+							call.error === undefined
+								? undefined
+								: mcpFailure(call.error, call.errorCode);
+						return {
+							owner_id: organizationId,
+							website_id: call.websiteId,
+							environment: call.environment,
+							timestamp: recentTimestamp(call.timestamp, now),
+							tool: call.tool,
+							is_error: failure !== undefined,
+							error: failure?.message,
+							error_code: failure?.code,
+							duration_ms: call.durationMs,
+							output_chars: call.outputChars,
+							session_id: call.sessionId,
+							client: mcpClient(call.clientName, call.userAgent),
+							client_name: call.clientName,
+							client_version: call.clientVersion,
+							server_name: call.serverName,
+							server_version: call.serverVersion,
+							user_agent: call.userAgent,
+						};
+					})
+				)
+			);
+
+			return json({ status: "success", count: calls.length }, 202);
+		} catch (error) {
+			rethrowOrWrap(error, log);
+		}
 	});
+
+export const vercelDrainRoute = new Elysia().post(
+	"/vercel/:websiteId",
+	async ({ params: { websiteId }, request }) => {
+		const log = useLogger();
+		log.set({ route: "vercel-drain", websiteId });
+
+		try {
+			const hostCheck = await loadHostCheck(websiteId);
+			const batch = await request
+				.arrayBuffer()
+				.then((body) => parseVercelLogs(new Uint8Array(body)))
+				.catch(() => null);
+			if (!batch) {
+				log.set({ rejected: "unparseable_body" });
+				return new Response(null, { status: 400 });
+			}
+
+			const now = Date.now();
+			const seenRequests = new Map<string, AiTrafficSpansInsert | null>();
+			const spans: AiTrafficSpansInsert[] = [];
+			const spanKeys: string[] = [];
+			let foreignHosts = 0;
+			for (const entry of batch.entries) {
+				const parsed = vercelLogSchema.safeParse(entry);
+				if (!parsed.success) {
+					continue;
+				}
+				const { id, proxy, requestId, timestamp } = parsed.data;
+				const userAgent = proxy.userAgent?.[0] ?? "";
+				const requestKey =
+					proxy.timestamp === undefined
+						? requestId || id
+						: `${proxy.timestamp} ${proxy.method} ${proxy.host} ${proxy.path} ${userAgent}`;
+				if (proxy.statusCode === -1) {
+					continue;
+				}
+				if (requestKey && seenRequests.has(requestKey)) {
+					const stored = seenRequests.get(requestKey);
+					if (stored?.status_code === 0) {
+						stored.status_code = Math.max(proxy.statusCode ?? 0, 0);
+					}
+					continue;
+				}
+				if (requestKey) {
+					seenRequests.set(requestKey, null);
+				}
+				if (!hostCheck.isHostAllowed(proxy.host)) {
+					foreignHosts += 1;
+					continue;
+				}
+				const pathname = proxy.path.split("?")[0] ?? "";
+				if (
+					(await recordedSetupCheck(websiteId, userAgent)) ||
+					isAssetPath(pathname)
+				) {
+					continue;
+				}
+				const columns = agentSpanColumns({ userAgent });
+				if (
+					!columns.agent_id &&
+					columns.bot_type !== BotCategory.SEARCH_ENGINE
+				) {
+					continue;
+				}
+				const span: AiTrafficSpansInsert = {
+					...columns,
+					client_id: websiteId,
+					timestamp: recentTimestamp(proxy.timestamp ?? timestamp, now),
+					user_agent: userAgent,
+					path: pathname.slice(0, 2048),
+					format: contentFormat(pathname),
+					host: proxy.host,
+					accept: "",
+					referrer: proxy.referer,
+					source: "vercel",
+					status_code: Math.max(proxy.statusCode ?? 0, 0),
+					verification: hostCheck.verification,
+				};
+				if (requestKey) {
+					seenRequests.set(requestKey, span);
+				}
+				spans.push(span);
+				spanKeys.push(requestKey ?? "");
+			}
+
+			const owner = crypto.randomUUID();
+			const claims = await Promise.all(
+				spans.map((span, index) =>
+					claimVercelRequest(
+						websiteId,
+						spanKeys.at(index) ?? "",
+						span.status_code ?? 0,
+						owner
+					)
+				)
+			);
+			const fresh = spans.filter((_, index) => claims.at(index) !== null);
+			if (fresh.length > 0) {
+				try {
+					await runPromise(sendBatch("analytics-ai-traffic-spans", fresh));
+				} catch (error) {
+					await releaseVercelRequests(
+						claims.filter((claim) => claim !== null)
+					).catch(() => {
+						log.set({ vercel_claim_release: "failed" });
+					});
+					throw error;
+				}
+			}
+			log.set({
+				vercel: {
+					entries: batch.entries.length,
+					stored: fresh.length,
+					redelivered: spans.length - fresh.length,
+					malformed_lines: batch.malformed,
+					foreign_hosts: foreignHosts,
+				},
+			});
+			return new Response(null, { status: 200 });
+		} catch (error) {
+			rethrowOrWrap(error, log);
+		}
+	},
+	{ parse: "none" }
+);

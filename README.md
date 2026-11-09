@@ -3,8 +3,14 @@
 Understand how people use your product: where they come from, what they do, and
 where they drop off. Use that insight to decide what to build or improve next.
 
+Databuddy is open-source product analytics for startups. One cookieless script
+tracks visitors, custom events, funnels, and goals, with opt-in error and web
+vitals tracking. Databunny, the built-in AI analyst, answers questions about
+your data and shows the query behind each answer. Feature flags, short links,
+and uptime monitoring run in the same dashboard.
+
 - **Building a product?** [Try hosted Databuddy](https://app.databuddy.cc) or follow the [tracker setup guide](https://www.databuddy.cc/docs/getting-started).
-- **Running your own stack?** Start with [self-hosting](#self-hosting) below.
+- **Running your own stack?** Read [self-hosting](#self-hosting) below. A packaged release is still pending.
 - **Want to help build Databuddy?** Read the [contributor guide](CONTRIBUTING.md). Bug reports and docs fixes count too.
 
 ## Self-hosting
@@ -47,18 +53,27 @@ docker compose -f docker-compose.selfhost.yml up -d --build
 ```
 
 Open your dashboard URL, create an account, and add your first website.
-The stack includes the dashboard, API, Basket event collector, and short-link
-service (port `2500`). Ports are configurable in `docker-compose.selfhost.yml`.
+The stack includes the dashboard, API, Basket event collector, uptime worker,
+and short-link service (port `2500`). Ports are configurable in `docker-compose.selfhost.yml`.
 
 For a public instance, replace the template's local URLs with your HTTPS URLs.
 Keep the dashboard and API on the same parent domain. Set `BETTER_AUTH_COOKIE_DOMAIN`, such as `.example.com`,
 to share login across subdomains. Leave it empty for localhost. Rebuild the
 dashboard after changing public URLs; they're part of its browser bundle.
 
+No shared parent domain, such as a PaaS default domain like `*.up.railway.app`?
+Leave `BETTER_AUTH_COOKIE_DOMAIN` empty and set the dashboard's `API_PROXY_URL`
+to the API's internal URL, then rebuild; the dashboard serves the API on its own origin.
+Set `MCP_URL` to the dashboard's public URL on both the dashboard and the API, so
+MCP clients find OAuth sign-in on that same origin.
+On a PaaS, build the dashboard from source with `dashboard.Dockerfile`; its URLs
+are baked in at build time, so there is no prebuilt dashboard image.
+
 ### Optional services
 
-- **Email:** For resets, invitations, and alerts, set `RESEND_API_KEY` and an `EMAIL_FROM` sender on your verified domain, such as `Databuddy <no-reply@example.com>`. Leave `ALERTS_EMAIL_FROM` empty to use the same sender. Recreate the services after changes.
-- **Insights:** Set `AI_GATEWAY_API_KEY` and `COMPOSE_PROFILES=insights` in `.env`, then rerun `docker compose -f docker-compose.selfhost.yml up -d --build`. Website research also needs `FIRECRAWL_API_KEY`.
+- **Email:** For resets, invitations, and alerts, set `RESEND_API_KEY` and an `EMAIL_FROM` sender on your verified domain, such as `Databuddy <no-reply@example.com>`. Leave `ALERTS_EMAIL_FROM` empty to use the same sender. Once both email settings are configured, set `REQUIRE_EMAIL_VERIFICATION=true` to require verified accounts. Recreate the services after changes.
+- **Social login:** Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, or `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`. Register your dashboard's `/api/auth/callback/google` or `/api/auth/callback/github` URL with the provider, then recreate the services. Sign-in options appear when configured; password sign-in works without email or social providers.
+- **Insights:** Set `AI_GATEWAY_API_KEY` in `.env`, then rerun `docker compose -f docker-compose.selfhost.yml up -d --build`. Website research also needs `CONTEXT_DEV_API_KEY`.
 - **Status pages:** Deploy [the status app](apps/status) separately with [Node, Bun, and dependencies](CONTRIBUTING.md#run-locally). From the repo root, set your API and status URLs before building:
 
   ```bash
@@ -88,14 +103,16 @@ docker compose -f docker-compose.selfhost.yml run --rm init bun run --cwd packag
 ```
 
 If you decline a change, stop the upgrade. After accepting the changes, create
-any missing ClickHouse tables and views:
+any missing ClickHouse tables, views, columns, and indexes:
 
 ```bash
 docker compose -f docker-compose.selfhost.yml run --rm init bun --cwd packages/db src/clickhouse/setup.ts
 ```
 
-This creates missing objects; it doesn't update existing ones. Apply any extra
-migrations in the release notes before starting the updated apps with
+This adds what's missing but never changes or drops existing objects. Columns
+and indexes are only added on single-node installs; with `CLICKHOUSE_CLUSTER`
+set, apply them yourself. Apply any extra migrations in the release notes before
+starting the updated apps with
 `docker compose -f docker-compose.selfhost.yml up -d --build`.
 
 ## Stay in touch
@@ -106,6 +123,6 @@ Found a security issue? Please follow [SECURITY.md](SECURITY.md).
 
 ## License
 
-[AGPL-3.0](LICENSE). Copyright (c) 2025 Databuddy Analytics, Inc.
+[AGPL-3.0](LICENSE), except `packages/scan` and `packages/pulumi`, which are [MIT](packages/scan/LICENSE) and [MIT](packages/pulumi/LICENSE), respectively. Copyright (c) 2025 Databuddy Analytics, Inc.
 
 [<img alt="Vercel OSS Program" src="https://vercel.com/oss/program-badge.svg" />](https://vercel.com/oss)

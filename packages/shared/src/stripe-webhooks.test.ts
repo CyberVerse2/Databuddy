@@ -5,13 +5,19 @@ import {
 } from "./stripe-webhooks";
 
 describe("STRIPE_WEBHOOK_EVENTS", () => {
-	const registeredEvents = [
-		...STRIPE_WEBHOOK_EVENTS.required,
-		...STRIPE_WEBHOOK_EVENTS.optional,
-	].map(({ event }) => event);
+	const registeredEvents = STRIPE_WEBHOOK_EVENTS.required.map(
+		({ event }) => event
+	);
 
 	test("registers every event exactly once", () => {
 		expect(new Set(registeredEvents).size).toBe(registeredEvents.length);
+	});
+
+	test("requires the Checkout metadata carriers for immediate and delayed payments", () => {
+		expect(registeredEvents).toContain("checkout.session.completed");
+		expect(registeredEvents).toContain(
+			"checkout.session.async_payment_succeeded"
+		);
 	});
 
 	test("requires every failure event so payment failures are never missed", () => {

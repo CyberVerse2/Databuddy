@@ -207,7 +207,7 @@ export default function OssForm() {
 						className={errors.name ? "border-destructive" : ""}
 						id="name"
 						maxLength={100}
-						placeholder="Jane Doe"
+						placeholder="Your name"
 						type="text"
 						{...register("name")}
 					/>
@@ -225,7 +225,7 @@ export default function OssForm() {
 						className={errors.email ? "border-destructive" : ""}
 						id="email"
 						maxLength={255}
-						placeholder="jane@example.com"
+						placeholder="you@example.com"
 						type="email"
 						{...register("email")}
 					/>
@@ -308,7 +308,7 @@ export default function OssForm() {
 						}`}
 						id="notes"
 						maxLength={800}
-						placeholder="Optional - project size, traffic, what you'd use it for"
+						placeholder="Optional: project size, traffic, what you'd use it for"
 						rows={3}
 						{...register("notes")}
 					/>

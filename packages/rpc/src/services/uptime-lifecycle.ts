@@ -13,19 +13,13 @@ import {
 type UptimeScheduleInsert = typeof uptimeSchedules.$inferInsert;
 type UptimeScheduleRow = typeof uptimeSchedules.$inferSelect;
 
-export interface UptimeScheduleUpdate {
-	cacheBust?: boolean;
-	cron?: string;
-	granularity?: UptimeGranularity;
-	name?: string | null;
-	timeout?: number | null;
-	updatedAt: Date;
-}
-
 export type UptimeScheduleSnapshot = Pick<
 	UptimeScheduleRow,
 	"cacheBust" | "cron" | "granularity" | "name" | "timeout"
 >;
+
+export type UptimeScheduleUpdate = Partial<UptimeScheduleSnapshot> &
+	Pick<UptimeScheduleRow, "updatedAt">;
 
 export interface UptimeLifecycleDeps {
 	now: () => Date;
@@ -35,7 +29,7 @@ export interface UptimeLifecycleDeps {
 		insert: (values: UptimeScheduleInsert) => Promise<void>;
 		update: (
 			scheduleId: string,
-			values: Partial<UptimeScheduleRow> | UptimeScheduleUpdate
+			values: Partial<UptimeScheduleRow>
 		) => Promise<void>;
 	};
 	upsertScheduler: (
@@ -105,7 +99,9 @@ export async function createScheduleWithScheduler(
 					"Failed to clean up monitor after BullMQ failure"
 				)
 			);
-		throw rpcError.internal("Failed to create monitor");
+		throw rpcError.internal(
+			"The monitor could not be created. Try again in a moment."
+		);
 	}
 }
 
@@ -158,7 +154,9 @@ export async function updateScheduleWithScheduler(
 					"Failed to roll back monitor granularity after scheduler update failure"
 				)
 			);
-		throw rpcError.internal("Failed to update monitor schedule");
+		throw rpcError.internal(
+			"The monitor could not be updated. Try again in a moment."
+		);
 	}
 }
 
@@ -178,11 +176,23 @@ export async function resumeScheduleWithScheduler(
 	granularity: UptimeGranularity,
 	deps: UptimeLifecycleDeps = uptimeLifecycleDeps
 ): Promise<void> {
-	await deps.upsertScheduler(scheduleId, granularity);
 	await deps.store.update(scheduleId, {
 		isPaused: false,
 		updatedAt: deps.now(),
 	});
+	try {
+		await deps.upsertScheduler(scheduleId, granularity);
+	} catch (error) {
+		await deps.store
+			.update(scheduleId, { isPaused: true, updatedAt: deps.now() })
+			.catch((rollbackError) =>
+				logger.error(
+					{ scheduleId, error: rollbackError },
+					"Failed to roll back monitor pause after scheduler resume failure"
+				)
+			);
+		throw error;
+	}
 }
 
 export async function triggerManualUptimeCheck(
@@ -191,7 +201,9 @@ export async function triggerManualUptimeCheck(
 	deps: ManualCheckDeps = manualCheckDeps
 ): Promise<void> {
 	if (isPaused) {
-		throw rpcError.badRequest("Cannot trigger check on a paused monitor");
+		throw rpcError.badRequest(
+			"This monitor is paused. Resume it to run a check."
+		);
 	}
 
 	const rateLimit = await deps.rateLimit(scheduleId);
@@ -203,6 +215,8 @@ export async function triggerManualUptimeCheck(
 		await deps.enqueueCheck(scheduleId);
 	} catch (error) {
 		logger.error({ scheduleId, error }, "Manual check failed");
-		throw rpcError.internal("Failed to trigger check");
+		throw rpcError.internal(
+			"The check could not be started. Try again in a moment."
+		);
 	}
 }

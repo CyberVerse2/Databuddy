@@ -60,6 +60,7 @@ AI_GATEWAY_API_KEY=<your Vercel AI Gateway key>
 ### Dashboard
 
 The dashboard must be built from the repo, not the prebuilt GHCR image, because Next.js bakes `NEXT_PUBLIC_*` values at build time.
+Railway's default domains share no parent domain, so the dashboard proxies `/rpc` and `/v1` to the API's private URL and the session cookie stays first-party. Leave `NEXT_PUBLIC_API_URL` unset; the build points it at the dashboard origin. `MCP_URL` points at the dashboard origin on both the Dashboard and the API, so MCP OAuth discovery names the URL clients actually reach, while the API keeps `API_URL` on its own domain for OpenAPI and discovery links.
 
 ```txt
 RAILWAY_DOCKERFILE_PATH=dashboard.Dockerfile
@@ -71,7 +72,8 @@ BETTER_AUTH_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_SECRET=${{shared.BETTER_AUTH_SECRET}}
 SELFHOST=${{shared.SELFHOST}}
 NEXT_PUBLIC_APP_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
-NEXT_PUBLIC_API_URL=https://${{API.RAILWAY_PUBLIC_DOMAIN}}
+MCP_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
+API_PROXY_URL=http://${{API.RAILWAY_PRIVATE_DOMAIN}}:${{API.PORT}}
 NEXT_PUBLIC_BASKET_URL=https://${{Events.RAILWAY_PUBLIC_DOMAIN}}
 NEXT_PUBLIC_STATUS_URL=https://${{Status.RAILWAY_PUBLIC_DOMAIN}}
 # When Links is enabled and has a public domain, set this before rebuilding Dashboard:
@@ -105,8 +107,10 @@ BETTER_AUTH_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_SECRET=${{shared.BETTER_AUTH_SECRET}}
 DATABUDDY_ENCRYPTION_KEY=${{shared.DATABUDDY_ENCRYPTION_KEY}}
 SELFHOST=${{shared.SELFHOST}}
+DELETED_DATA_PURGE=true
 DASHBOARD_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
 API_URL=https://${{API.RAILWAY_PUBLIC_DOMAIN}}
+MCP_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
 # Seed testing only when building API from repo:
 # RAILWAY_DOCKERFILE_PATH=api.Dockerfile
 BASKET_URL=https://${{Events.RAILWAY_PUBLIC_DOMAIN}}
@@ -138,6 +142,9 @@ DASHBOARD_URL=https://${{Dashboard.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_SECRET=${{shared.BETTER_AUTH_SECRET}}
 DATABUDDY_ENCRYPTION_KEY=${{shared.DATABUDDY_ENCRYPTION_KEY}}
 AI_GATEWAY_API_KEY=${{shared.AI_GATEWAY_API_KEY}}
+RESEND_API_KEY=${{API.RESEND_API_KEY}}
+EMAIL_FROM=${{API.EMAIL_FROM}}
+API_URL=https://${{API.RAILWAY_PUBLIC_DOMAIN}}
 INSIGHTS_WORKER_ENABLED=true
 SELFHOST=${{shared.SELFHOST}}
 ```
@@ -153,11 +160,7 @@ CLICKHOUSE_URL=${{ClickHouse.DATABASE_URL}}
 NODE_ENV=production
 ```
 
-Command:
-
-```bash
-bun run --cwd packages/db db:push && bun --cwd packages/db src/clickhouse/setup.ts
-```
+Leave the start command empty. The `init.Dockerfile` command answers `db:push` prompts without a TTY and fails the run if a change is aborted, then applies the ClickHouse schema; a custom command skips both.
 
 ### Links (optional)
 
@@ -193,10 +196,4 @@ Redpanda or ClickHouse. Losing one delivery sink reports `degraded` with HTTP
 
 ## First-run schema setup
 
-Use the `Init` service for first-run setup instead of asking users to run commands locally. It runs:
-
-```bash
-bun run --cwd packages/db db:push && bun --cwd packages/db src/clickhouse/setup.ts
-```
-
-Keep it as a manual one-shot service/job in Railway. Do not add custom wait loops or runtime migration logic to the app services unless Railway template testing proves it is necessary.
+Use the `Init` service for first-run setup instead of asking users to run commands locally. Keep it as a manual one-shot service/job in Railway. Do not add custom wait loops or runtime migration logic to the app services unless Railway template testing proves it is necessary.

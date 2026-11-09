@@ -19,6 +19,8 @@ Keep additions **minimal**: one bullet, a new `rg` hint, or a routing note—eno
 
 ## Quick Map
 
+- Work directly in the local `staging` checkout by default. Task branches, worktrees, and PRs require an explicit user request; preserve existing local edits.
+
 - Self-host changes must preserve hosted behavior with `SELFHOST` unset or `false`, including auth cookies/email, generated snippets, CSP, and image publication. Compare to the pre-change path; import guard-only helpers from `@databuddy/env/boolean` so checking the mode does not initialize unrelated URL config.
 
 - Before any PR merge, follow the AGENTS.md review-feedback gate: wait for configured reviewers on the final head, read all comment/review/thread pages, address each finding with evidence, and re-fetch to verify no unresolved feedback. Review bots can finish several minutes after a draft becomes ready; green CI does not establish completed review.
@@ -29,9 +31,9 @@ Keep additions **minimal**: one bullet, a new `rg` hint, or a routing note—eno
 - Dashboard Playwright webServer commands run under CI PATH from setup-bun; avoid `bash -lc` because login shells can drop Bun from PATH. Build dist-only workspace packages such as `@databuddy/sdk` and `@databuddy/devtools` before starting the API/dashboard. Client `NEXT_PUBLIC_*` flags must use direct env access so Next can inline them. `readBooleanEnv` only treats the literal string `"true"` as enabled, so CI E2E booleans must use `"true"`/`"false"`, not `"1"`/`"0"`.
 - Dashboard pages that call `useSearchParams()` must keep that call inside a Suspense-rendered child; run the production dashboard build after adding URL-driven onboarding state.
 - Business context loads through `OrganizationProvider` before its page query and generation-access check; keep all three states on the same page/card geometry and test their transitions with delayed requests on desktop and mobile.
-- Business-context generation runs in the API; verify `AI_GATEWAY_API_KEY`, `FIRECRAWL_API_KEY`, and hosted `AUTUMN_SECRET_KEY` on the serving API deployment. Worker credentials and a green `/health` do not establish feature readiness.
+- Business-context generation runs in the API; verify `AI_GATEWAY_API_KEY`, `CONTEXT_DEV_API_KEY`, and hosted `AUTUMN_SECRET_KEY` on the serving API deployment. Worker credentials and a green `/health` do not establish feature readiness.
 - Failed business-context generations survive refresh; dismiss them through the existing generation-ID-scoped cancel mutation while preserving unsaved editor drafts. Hiding the message in component state is not durable.
-- Playwright launched through Bun still uses Node; use portable Promise constructors for deferred E2E requests because CI may not support `Promise.withResolvers`.
+- Playwright launched through Bun still uses the Node on PATH. CI installs Node 24; local Node 20 lacks `Promise.withResolvers`, so keep deferred E2E requests on portable Promise constructors.
 - The local `.env` sets `NODE_ENV=development`; override it with `NODE_ENV=production` when verifying `next build`, or root-error prerender behavior can produce a misleading local failure.
 - Local dashboard E2E tests that need `/api/test/e2e/*` should start the API/dashboard directly (or through Playwright's webServer command), not via `bun run dev:dashboard`; Turbo runs in strict env mode and drops `DATABUDDY_E2E_MODE`/`DATABUDDY_E2E_TEST_KEY` unless they are added to `turbo.json` `globalEnv`.
 - Dashboard Playwright public/demo analytics specs call API `/v1/query` anonymously from the browser; keep `DATABUDDY_E2E_MODE` query behavior isolated from production rate limits so CI retries do not exhaust `anon:unknown`.
@@ -43,11 +45,13 @@ Keep additions **minimal**: one bullet, a new `rg` hint, or a routing note—eno
 - Run Slack tests through `bun run test` inside `apps/slack`; the package script supplies only the inert Redis URL needed by eager shared imports.
 - Inspect root `package.json` overrides before interpreting Slack dependency manifest versions or apparent lockfile drift; the effective `@slack/web-api` version may be pinned there.
 - Slack routing is organization-scoped: OAuth binds a Slack workspace to a Databuddy organization, app mentions from the installed workspace auto-bind channels including Slack Connect, and `/bind` is now a manual fallback for unknown/unapproved channels. DMs/assistant threads work after workspace install. Analytics questions should go through app mentions/DMs using MCP-style website discovery inside the installed organization, never by fanning out across the message sender's user memberships. Slack emits evlog events under `apps/slack/.evlog/logs` in development/`SLACK_EVLOG_FS=1`; Axiom uses `AXIOM_TOKEN` and the `slack` dataset; reactions need the `reactions:write` bot scope.
+- Model evaluations should use the user’s agreed quality, latency, and cost tradeoff; an explicitly accepted accuracy regression is not an adoption veto. Keep authorization and execution validation deterministic, and report fresh held-out results with failures and model overhead included.
 - Slack scope changes require reinstalling/reauthorizing the workspace; updating the local/remote manifest alone does not grant newly-added bot scopes to an existing installation.
 - Slack agent billing flows through an org-scoped automation API key; existing keys may have `userId: null`, so the agent billing resolver must fall back to the organization owner when an API key has `organizationId`.
 - Slack memory is separate from billing/auth: pass a Slack-scoped `memoryUserId` such as `slack-{team}-{user}` plus current-speaker context so one Slack user's saved name/preferences do not bleed into another user's replies.
 - Slack agent tools use the scopes on the internal principal in `slack/installations.ts`; changing those Databuddy scopes applies without Slack reauthorization. Only changes to Slack OAuth scopes require reconnecting the workspace.
 - Shared agent integrations should call `@databuddy/ai/agent` (`askDatabuddyAgent` / `streamDatabuddyAgent`) instead of importing internal MCP run/history helpers directly.
+- Keep the Jev evaluation request in its owning classifier; do not add a provider-wrapper file for a single call. Slack message types already live in `ai/mcp/slack-context.ts`.
 - The shared conversational MCP runner (including Slack) uses native goal/link tools through `createMcpAgentTools`; the external MCP server has separate wrappers in `mcp/workspace-tools.ts`.
 - First-party ads attribution work should start by preserving UTMs into registration and signup events only; do not add RPC plumbing, conversion destinations, env hooks, tables, workers, or UI until explicitly needed.
 - Organization business-context drafting is an active streaming request owned by `apps/api/src/ai/organization-business-context.ts`, injected into oRPC by the API host. Its request abort cancels only the matching generation; consumed usage settlement stays independent. Investigation generation stays in `apps/insights`.
@@ -235,6 +239,8 @@ Read [codebase-map.md](./references/codebase-map.md) when you need deeper routin
 
 - Core auth setup: `packages/auth/src/auth.ts`
 - Client auth entrypoint: `packages/auth/src/client/auth-client.ts`
+- Use the native OAuth provider client for consent and connected apps; public client metadata uses `client_name`, not `name`.
+- Better Auth OAuth tables have no Drizzle relational-query entries; use `db.select().from(oauthConsent)` and schema columns rather than `db.query.oauthConsent`.
 - Permission helpers often flow through `packages/rpc`
 
 ### SDK and tracker work

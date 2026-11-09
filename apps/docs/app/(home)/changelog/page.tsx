@@ -18,24 +18,24 @@ import {
 export const revalidate = 3600;
 
 export const metadata: Metadata = {
-	title: "Changelog",
+	title: { absolute: "Databuddy changelog: new features and fixes" },
 	description:
-		"Stay up to date with the latest features, improvements, and fixes shipped to Databuddy.",
+		"Every Databuddy release: new analytics features, Databunny AI analyst updates, SDK changes, and fixes, newest first. Follow along as the product ships.",
 	alternates: {
 		canonical: "https://www.databuddy.cc/changelog",
 	},
 	openGraph: {
-		title: "Changelog",
+		title: "Databuddy changelog: new features and fixes",
 		description:
-			"Stay up to date with the latest features, improvements, and fixes shipped to Databuddy.",
+			"Every Databuddy release: new analytics features, Databunny AI analyst updates, SDK changes, and fixes, newest first. Follow along as the product ships.",
 		url: "https://www.databuddy.cc/changelog",
 		images: ["/og-image.png"],
 	},
 	twitter: {
 		card: "summary_large_image",
-		title: "Changelog",
+		title: "Databuddy changelog: new features and fixes",
 		description:
-			"Stay up to date with the latest features, improvements, and fixes shipped to Databuddy.",
+			"Every Databuddy release: new analytics features, Databunny AI analyst updates, SDK changes, and fixes, newest first. Follow along as the product ships.",
 		images: ["/og-image.png"],
 	},
 };
@@ -92,15 +92,20 @@ function ChangelogEntry({
 
 export default async function ChangelogPage() {
 	const result = await getChangelogs();
+	if ("error" in result && !result.unconfigured) {
+		throw new Error(
+			`Failed to load changelog: ${result.status} ${result.statusText}`
+		);
+	}
 	const posts = "error" in result ? [] : result.posts;
 
 	return (
 		<div>
 			<StructuredData
 				page={{
-					title: "Changelog",
+					title: "Databuddy changelog: new features and fixes",
 					description:
-						"Stay up to date with the latest features, improvements, and fixes shipped to Databuddy.",
+						"Every Databuddy release: new analytics features, Databunny AI analyst updates, SDK changes, and fixes, newest first. Follow along as the product ships.",
 					url: "https://www.databuddy.cc/changelog",
 				}}
 			/>
@@ -113,9 +118,9 @@ export default async function ChangelogPage() {
 									aria-hidden="true"
 									className="h-1.5 w-1.5 rounded bg-foreground/60"
 								/>
-								DATABUDDY
+								Databuddy
 								<span className="text-foreground/40">•</span>
-								CHANGELOG
+								Changelog
 							</div>
 							<h1 className="mb-2 font-semibold text-3xl leading-tight tracking-tight sm:text-4xl md:text-5xl lg:text-5xl">
 								What&apos;s new in Databuddy
@@ -173,7 +178,7 @@ export default async function ChangelogPage() {
 							aria-hidden
 							className="shrink-0"
 							height={16}
-							src="/notra.svg"
+							src="/social/notra.svg"
 							width={16}
 						/>
 						<span className="font-medium text-xs tracking-wide">Notra</span>

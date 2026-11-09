@@ -1,0 +1,161 @@
+---
+title: AI agents
+description: See which AI products read your site, which pages and formats they fetch, and how many visitors they send
+---
+
+import { Callout, CodeBlock } from "@/components/docs";
+
+The AI Agents page shows ChatGPT, Claude, Perplexity, Gemini, Meta AI, Claude Code and other AI products: the pages they read, whether they fetched HTML, markdown or `llms.txt`, and the visitors they sent you.
+
+Agents that run JavaScript and visitors referred by AI assistants show up automatically through the Databuddy script. Crawlers and coding agents like GPTBot, ClaudeBot and Claude Code don't run JavaScript, so they only show up once `@databuddy/sdk/agents` runs on your server.
+
+<Callout type="info">
+  **Package**: `@databuddy/sdk` 3.0.1+ | **Import**: `@databuddy/sdk/agents`
+</Callout>
+
+## Setup
+
+Install the SDK, or upgrade it if you're on 2.x, which doesn't include `@databuddy/sdk/agents`, or 3.0.0, which misses signed agent browsers and markdown-first clients:
+
+<CodeBlock language="bash">
+  {`bun add @databuddy/sdk@latest`}
+</CodeBlock>
+
+No API key is needed, only your website ID. If you already use the Databuddy SDK, it's set:
+
+<CodeBlock language="bash">
+  {`NEXT_PUBLIC_DATABUDDY_CLIENT_ID=your_website_id`}
+</CodeBlock>
+
+The `NUXT_PUBLIC_`, `VITE_` and `REACT_APP_` versions of the variable work too, as does `DATABUDDY_WEBSITE_ID`. Requests are only recorded when they come from your website's domain or one of its allowed origins, so local development never shows up.
+
+### Next.js and Fumadocs
+
+If you don't have a proxy yet, create `proxy.ts` (Next.js 16) next to your `app` folder:
+
+<CodeBlock language="ts">
+  {`export { proxy } from "@databuddy/sdk/agents";`}
+</CodeBlock>
+
+On Next.js 15, create `middleware.ts` instead:
+
+<CodeBlock language="ts">
+  {`export { proxy as middleware } from "@databuddy/sdk/agents";`}
+</CodeBlock>
+
+If you already have a proxy, add one line to it:
+
+<CodeBlock language="ts">
+  {`import { trackAgents } from "@databuddy/sdk/agents";
+import { type NextFetchEvent, type NextRequest, NextResponse } from "next/server";
+
+export function proxy(request: NextRequest, event: NextFetchEvent) {
+  event.waitUntil(trackAgents(request));
+  return NextResponse.next();
+}`}
+</CodeBlock>
+
+<Callout type="warn">
+  If your proxy has a `matcher`, make sure it doesn't exclude `.md` and `.txt` paths. Those are the markdown pages and `llms.txt` files AI tools fetch most.
+</Callout>
+
+Fumadocs sites need nothing extra. Markdown requested through a `.md` URL or an `Accept: text/markdown` header is recorded as markdown, and `llms.txt` and `llms-full.txt` are recorded on their own.
+
+### Vercel (any framework)
+
+For Vite, Astro or any other site on Vercel, add `middleware.ts` at the project root:
+
+<CodeBlock language="ts">
+  {`export { proxy as default } from "@databuddy/sdk/agents";`}
+</CodeBlock>
+
+### Vercel log drain (no code)
+
+On a Vercel Pro or Enterprise plan you can send your request logs instead of adding code. In Vercel, open **Team Settings → Drains → Add Drain**, choose **Logs** and **Custom Endpoint**, and paste:
+
+<CodeBlock language="bash">
+  {`https://basket.databuddy.cc/vercel/your_website_id`}
+</CodeBlock>
+
+Select the **Static Files**, **Functions**, **Edge Functions** and **Rewrites** sources and the **Production** environment, choose JSON or NDJSON, and leave sampling off. Databuddy keeps only requests from AI agents and search engine crawlers, from hosts that belong to your website, and stores each request once even when Vercel logs it more than once. Vercel bills drains by volume.
+
+Logs don't include the `Accept` header, so markdown is recognized from `.md` and `.mdx` paths only, and signed agent browsers look like regular Chrome. In exchange, drains also store the HTTP status each agent got, so you can ask the assistant which pages return 404 to AI crawlers.
+
+### Cloudflare Workers, Hono, and other fetch handlers
+
+<CodeBlock language="ts">
+  {`import { trackAgents } from "@databuddy/sdk/agents";
+
+export default {
+  async fetch(request, env, ctx) {
+    const websiteId = env.DATABUDDY_WEBSITE_ID;
+    ctx.waitUntil(trackAgents(request, { websiteId }));
+    return fetch(request);
+  },
+};`}
+</CodeBlock>
+
+Workers don't have `process.env`, so set the website ID as a variable in `wrangler.toml` and pass it as an option:
+
+<CodeBlock language="bash">
+  {`[vars]
+DATABUDDY_WEBSITE_ID = "your_website_id"`}
+</CodeBlock>
+
+### Netlify
+
+Add an edge function at `netlify/edge-functions/databuddy.ts`. It runs in front of every request, including static `llms.txt` and markdown files:
+
+<CodeBlock language="ts">
+  {`import { trackAgents } from "@databuddy/sdk/agents";
+
+export default (request, context) => {
+  const websiteId = Netlify.env.get("DATABUDDY_WEBSITE_ID");
+  context.waitUntil(trackAgents(request, { websiteId }));
+};
+
+export const config = { path: "/*" };`}
+</CodeBlock>
+
+Set `DATABUDDY_WEBSITE_ID` under **Site configuration → Environment variables**. Returning nothing passes the request through, so your site keeps serving as before.
+
+### Express and Node
+
+<CodeBlock language="ts">
+  {`import { trackAgents } from "@databuddy/sdk/agents";
+
+app.use((req, _res, next) => {
+  trackAgents(req);
+  next();
+});`}
+</CodeBlock>
+
+## What gets recorded
+
+`trackAgents` reports `GET` and `HEAD` requests from AI agents and skips images, scripts, styles and fonts. It recognizes three kinds: known AI products by their user agent; agent browsers such as ChatGPT agent, which send a regular Chrome user agent but sign their requests with a `Signature-Agent` header; and clients that aren't browsers and ask for markdown first in their `Accept` header, as tools built for AI do, which are recorded as unidentified agents named after their user agent. Each request records the page path without its query string, the host, the user agent, the `Accept` header, the referrer, the agent, and the format it asked for:
+
+| Format | When |
+| --- | --- |
+| Markdown | The path ends in `.md` or `.mdx`, or the request accepts `text/markdown` |
+| llms.txt | The path is `llms.txt` or `llms-full.txt` |
+| HTML | Anything else |
+
+It never throws and never delays your response: requests to Databuddy run in the background and time out after 3 seconds.
+
+### Limits to keep in mind
+
+- **A read is not a citation.** An AI product fetching a page means it can use it, not that an answer quoted it. Visitors sent from AI are the signal that an answer linked to you.
+- **User agents can be copied.** Anyone can send a request that claims to be GPTBot, so treat a sudden burst from one crawler with care.
+- **Requests made for a user may ignore robots.txt.** Crawlers such as GPTBot follow it; fetches a person triggers inside ChatGPT or Claude often don't.
+- **Visitors from AI depend on what the AI product passes along.** Visits count when the referrer or `utm_source` names an AI product, or the visitor uses an AI app browser. Apps that strip both show up as direct traffic.
+- **Failed requests aren't reads.** With a Vercel log drain, requests that got an error are listed separately, and neither errors nor redirects count as pages read. A 304 response, where a crawler checked a page it already had, does count.
+
+## Test your setup
+
+Deploy, then open the AI Agents page in your dashboard and click **Test setup**. Databuddy requests your homepage and `/llms.txt` as GPTBot and tells you whether each request was recorded. Test requests never show up in your data.
+
+Static hosts without middleware (GitHub Pages, S3) and hosted docs platforms that don't let you run code can't report crawler requests. Sites on Vercel can use a log drain, and sites on Netlify an edge function.
+
+## Weekly AI digest
+
+Every Monday at 9:00 UTC, the owners of each organization get an email for every site that got at least one visitor from AI, or at least ten AI reads, in the previous week (Monday to Sunday, UTC). It shows the visitors AI sent compared with the week before, how many times AI read the site, how many pages AI hadn't read in the previous 90 days, each AI product's reads and visitors, where AI visitors landed, and the most read pages. Turn it off under **Settings → Notifications → Weekly AI digest**, or with your email app's Unsubscribe button.

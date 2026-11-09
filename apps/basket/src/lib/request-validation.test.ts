@@ -10,7 +10,6 @@ const {
 	mockLogBlockedTraffic,
 	mockRunFork,
 	mockSend,
-	mockDetectBot,
 	mockLoggerSet,
 } = vi.hoisted(() => ({
 	mockGetWebsiteByIdV2: vi.fn(),
@@ -20,7 +19,6 @@ const {
 	mockLogBlockedTraffic: vi.fn(),
 	mockRunFork: vi.fn(),
 	mockSend: vi.fn(() => ({})),
-	mockDetectBot: vi.fn(() => ({ isBot: false })),
 	mockLoggerSet: vi.fn(),
 }));
 
@@ -43,10 +41,6 @@ vi.mock("@lib/producer", () => ({
 	send: mockSend,
 }));
 
-vi.mock("@utils/user-agent", () => ({
-	detectBot: mockDetectBot,
-}));
-
 vi.mock("evlog/elysia", () => ({
 	useLogger: () => ({
 		set: mockLoggerSet,
@@ -61,8 +55,12 @@ vi.mock("@lib/tracing", () => ({
 	captureError: vi.fn(),
 }));
 
-const { validateRequest, checkForBot, getWebsiteSecuritySettings } =
-	await import("./request-validation");
+const {
+	validateRequest,
+	checkForBot,
+	getWebsiteSecuritySettings,
+	recordAiPageView,
+} = await import("./request-validation");
 
 function website(overrides: Record<string, unknown> = {}) {
 	return {
@@ -160,6 +158,15 @@ describe("validateRequest", () => {
 			organizationId: "org_1",
 		});
 		expect(mockCheckAutumnUsage).toHaveBeenCalledOnce();
+	});
+
+	test("search engine renderers are not billed as events", async () => {
+		await validateRequest(
+			{},
+			{ client_id: "ws_1" },
+			makeReq(undefined, { "user-agent": GOOGLEBOT_RENDERER })
+		);
+		expect(mockCheckAutumnUsage).not.toHaveBeenCalled();
 	});
 
 	test("client_id from query string wins", async () => {
@@ -339,136 +346,129 @@ describe("validateRequest", () => {
 	});
 });
 
+const GOOGLEBOT_RENDERER =
+	"Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.36 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+
 describe("checkForBot", () => {
+	const GPTBOT =
+		"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)";
+
 	beforeEach(() => {
-		mockDetectBot.mockReset();
 		mockRunFork.mockReset();
 		mockSend.mockReset();
 		mockLogBlockedTraffic.mockReset();
 		mockLoggerSet.mockReset();
 	});
 
-	test("non-bot traffic passes through untouched", async () => {
-		mockDetectBot.mockReturnValue({ isBot: false });
+	test("lets people through untouched", async () => {
 		await expect(
-			checkForBot(makeReq(), {}, {}, "ws_1", "Mozilla/5.0 Chrome/120")
+			checkForBot(
+				makeReq(),
+				{},
+				{},
+				"ws_1",
+				"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+			)
 		).resolves.toBeUndefined();
+		expect(mockSend).not.toHaveBeenCalled();
+		expect(mockLogBlockedTraffic).not.toHaveBeenCalled();
 	});
 
-	test("allow-listed bot passes through untouched", async () => {
-		mockDetectBot.mockReturnValue({
-			isBot: true,
-			action: "allow",
-			botName: "Googlebot",
-			category: "Known Bot",
-		});
-		await expect(
-			checkForBot(makeReq(), {}, {}, "ws_1", "Googlebot/2.1")
-		).resolves.toBeUndefined();
-	});
-
-	test("track_only bot short-circuits with 204 and records an AI traffic span", async () => {
-		mockDetectBot.mockReturnValue({
-			isBot: true,
-			action: "track_only",
-			botName: "GPTBot",
-			category: "AI Crawler",
-			result: { category: "ai_crawler" },
-		});
+	test("search engine renderers record a search engine span at the server's time, not the page's frozen clock", async () => {
+		const midnight = Date.parse("2026-10-10T00:00:00.342Z");
+		const received = Date.parse("2026-10-10T19:49:42.000Z");
+		vi.useFakeTimers({ now: received });
+		const event = {
+			name: "screen_view",
+			path: "/pricing",
+			timestamp: midnight,
+		};
 		const result = await checkForBot(
 			makeReq(),
-			{ path: "/about" },
+			event,
 			{},
 			"ws_1",
-			"GPTBot/1.0"
+			GOOGLEBOT_RENDERER
 		);
-		expect(result?.error?.status).toBe(204);
+		recordAiPageView(event, "ws_1", GOOGLEBOT_RENDERER);
+		vi.useRealTimers();
+
+		expect(result?.isTrackOnly).toBe(true);
+		expect(mockLogBlockedTraffic).not.toHaveBeenCalled();
+		expect(mockSend).toHaveBeenCalledWith(
+			"analytics-ai-traffic-spans",
+			expect.objectContaining({
+				agent_id: "",
+				bot_name: "GoogleBot",
+				bot_type: "search_engine",
+				path: "/pricing",
+				source: "tracker",
+				timestamp: received,
+			})
+		);
+	});
+
+	test("AI crawlers short-circuit with 204 and their page views record an AI traffic span", async () => {
+		const event = { name: "screen_view", path: "/about" };
+		const result = await checkForBot(makeReq(), event, {}, "ws_1", GPTBOT);
+		expect(result?.response?.status).toBe(204);
+		expect(result?.isTrackOnly).toBe(true);
+		expect(mockSend).not.toHaveBeenCalled();
+		recordAiPageView(event, "ws_1", GPTBOT);
 		expect(mockSend).toHaveBeenCalledWith(
 			"analytics-ai-traffic-spans",
 			expect.objectContaining({
 				client_id: "ws_1",
-				bot_name: "GPTBot",
+				agent_id: "openai-crawler",
+				agent_purpose: "training",
 				bot_type: "ai_crawler",
 				path: "/about",
-				action: "tracked",
+				source: "tracker",
 			})
 		);
 		expect(mockRunFork).toHaveBeenCalledOnce();
 	});
 
 	test.each([
-		["body.url", { url: "/from-url" }, {}, "/from-url"],
-		["query.path", {}, { path: "/from-query" }, "/from-query"],
-	])("track_only path falls back to %s", async (_label, body, query, expected) => {
-		mockDetectBot.mockReturnValue({
-			isBot: true,
-			action: "track_only",
-			botName: "ClaudeBot",
-			result: { category: "ai_crawler" },
-		});
-		await checkForBot(makeReq(), body, query, "ws_1", "ClaudeBot");
+		["page exits", { name: "page_exit", path: "/about" }],
+		["custom events", { name: "signup", path: "/about" }],
+	])("AI traffic spans skip %s", (_label, event) => {
+		recordAiPageView(event, "ws_1", GPTBOT);
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
+	test("AI traffic spans take path and referrer from the event only", () => {
+		recordAiPageView(
+			{ name: "screen_view", path: "https://example.com/pricing" },
+			"ws_1",
+			GPTBOT
+		);
 		expect(mockSend).toHaveBeenCalledWith(
 			"analytics-ai-traffic-spans",
-			expect.objectContaining({ path: expected })
+			expect.objectContaining({
+				path: "https://example.com/pricing",
+				referrer: null,
+			})
 		);
 	});
 
-	test("track_only path falls back to the referer header last", async () => {
-		mockDetectBot.mockReturnValue({
-			isBot: true,
-			action: "track_only",
-			botName: "Bot",
-			result: { category: "ai" },
-		});
-		await checkForBot(
-			makeReq("https://example.com", { referer: "https://ref.com/page" }),
+	test("blocked bots short-circuit with 204 and log blocked traffic", async () => {
+		const result = await checkForBot(
+			makeReq(),
 			{},
 			{},
 			"ws_1",
-			"Bot"
+			"Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"
 		);
-		expect(mockSend).toHaveBeenCalledWith(
-			"analytics-ai-traffic-spans",
-			expect.objectContaining({ path: "https://ref.com/page" })
-		);
-	});
-
-	test("blocked bot short-circuits with 204 and logs blocked traffic", async () => {
-		mockDetectBot.mockReturnValue({
-			isBot: true,
-			action: "block",
-			botName: "BadBot",
-			reason: "known_scraper",
-			category: "Known Bot",
-		});
-		const result = await checkForBot(makeReq(), {}, {}, "ws_1", "BadBot/1.0");
-		expect(result?.error?.status).toBe(204);
+		expect(result?.response?.status).toBe(204);
+		expect(mockSend).not.toHaveBeenCalled();
 		expect(mockLogBlockedTraffic).toHaveBeenCalledWith(
 			expect.any(Request),
 			{},
 			{},
-			"known_scraper",
+			"seo_tool_pattern",
 			"Known Bot",
-			"BadBot",
-			"ws_1"
-		);
-	});
-
-	test("bot without an explicit action defaults to blocking", async () => {
-		mockDetectBot.mockReturnValue({
-			isBot: true,
-			action: undefined,
-			reason: "unknown_bot",
-		});
-		const result = await checkForBot(makeReq(), {}, {}, "ws_1", "SomeBot");
-		expect(result?.error?.status).toBe(204);
-		expect(mockLogBlockedTraffic).toHaveBeenCalledWith(
-			expect.any(Request),
-			{},
-			{},
-			"unknown_bot",
-			"Bot Detection",
-			undefined,
+			"AhrefsBot",
 			"ws_1"
 		);
 	});

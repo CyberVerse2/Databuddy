@@ -1,11 +1,11 @@
 import {
 	and,
 	asc,
+	count,
 	eq,
 	getTableColumns,
 	isNull,
 	isUniqueViolationFor,
-	sql,
 	withTransaction,
 } from "@databuddy/db";
 import { linkFolders, links } from "@databuddy/db/schema";
@@ -72,21 +72,24 @@ export const linkFoldersRouter = {
 			return context.db
 				.select({
 					...getTableColumns(linkFolders),
-					linkCount: sql<number>`(
-						select count(*)::int
-						from ${links}
-						where ${links.organizationId} = ${organizationId}
-							and ${links.folderId} = ${linkFolders.id}
-							and ${links.deletedAt} is null
-					)`.mapWith(Number),
+					linkCount: count(links.id),
 				})
 				.from(linkFolders)
+				.leftJoin(
+					links,
+					and(
+						eq(links.organizationId, organizationId),
+						eq(links.folderId, linkFolders.id),
+						isNull(links.deletedAt)
+					)
+				)
 				.where(
 					and(
 						eq(linkFolders.organizationId, organizationId),
 						isNull(linkFolders.deletedAt)
 					)
 				)
+				.groupBy(linkFolders.id)
 				.orderBy(asc(linkFolders.name));
 		}),
 
@@ -141,7 +144,9 @@ export const linkFoldersRouter = {
 						.returning();
 
 					if (!folder) {
-						throw rpcError.internal("Failed to create link folder");
+						throw rpcError.internal(
+							"The folder could not be created. Try again in a moment."
+						);
 					}
 
 					return folder;
@@ -150,12 +155,16 @@ export const linkFoldersRouter = {
 						throw error;
 					}
 					if (input.slug) {
-						throw rpcError.conflict("This folder slug is already taken");
+						throw rpcError.conflict(
+							"A folder with this slug already exists. Pick a different slug."
+						);
 					}
 				}
 			}
 
-			throw rpcError.internal("Failed to generate unique folder slug");
+			throw rpcError.internal(
+				"A unique folder slug could not be generated. Enter a custom slug and try again."
+			);
 		}),
 
 	update: trackedProcedure
@@ -191,7 +200,9 @@ export const linkFoldersRouter = {
 				return updatedFolder;
 			} catch (error) {
 				if (isUniqueViolationFor(error, "link_folders_org_slug_unique")) {
-					throw rpcError.conflict("This folder slug is already taken");
+					throw rpcError.conflict(
+						"A folder with this slug already exists. Pick a different slug."
+					);
 				}
 				throw error;
 			}

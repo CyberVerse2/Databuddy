@@ -15,7 +15,7 @@ export interface RouteContinuationComparison {
 	unmatchedExposedSessions: number;
 }
 
-export interface RouteContinuationPolicy {
+interface RouteContinuationPolicy {
 	minimumCohort: number;
 	minimumExposedMatchRate: number;
 }
@@ -252,22 +252,22 @@ export function parseErrorCustomerImpact(
 	) {
 		throw new Error("Inconsistent error customer impact result");
 	}
-	const expectedCoverage =
-		result.affectedVisitorIdentifiers === 0
-			? 0
-			: Math.round(
-					(result.linkedVisitorIdentifiers /
-						result.affectedVisitorIdentifiers) *
-						1000
-				) / 10;
-	if (Math.abs(result.identityCoveragePercent - expectedCoverage) > 0.05) {
+	if (
+		Math.abs(
+			result.identityCoveragePercent -
+				expectedPercent(
+					result.linkedVisitorIdentifiers,
+					result.affectedVisitorIdentifiers
+				)
+		) > 0.05
+	) {
 		throw new Error("Inconsistent error customer impact identity coverage");
 	}
 	return result;
 }
 
 function continuationEvidenceFromSignal(
-	signal: InvestigationSignal
+	signal: Pick<InvestigationSignal, "cohortMeasurement">
 ): RouteContinuationEvidence | null {
 	const measurement = signal.cohortMeasurement;
 	if (!measurement) {
@@ -375,31 +375,45 @@ function countLabel(value: number, singular: string): string {
 	return `${value.toLocaleString("en-US")} ${singular}${value === 1 ? "" : "s"}`;
 }
 
-export function errorCustomerImpactEvidence(
-	impact: ErrorCustomerImpact
+function routeContinuationSentence(
+	continuation: RouteContinuationEvidence
 ): string {
+	return `Among ${countLabel(continuation.exposedSessions, "error-exposed session")} and ${countLabel(continuation.controlSessions, "matched control session")} on the same route, day, device, and browser, ${continuation.exposedContinuationPercent.toLocaleString("en-US", { maximumFractionDigits: 1 })}% of exposed sessions later viewed a different page within 10 minutes, versus ${continuation.controlContinuationPercent.toLocaleString("en-US", { maximumFractionDigits: 1 })}% of controls (${continuation.percentagePointDifference.toLocaleString("en-US", { maximumFractionDigits: 1 })} percentage points). This is an association, not proof that the error caused the difference.`;
+}
+
+export function cohortMeasurementEvidence(
+	signal: Pick<InvestigationSignal, "cohortMeasurement">
+): string | null {
+	const continuation = continuationEvidenceFromSignal(signal);
+	return continuation ? routeContinuationSentence(continuation) : null;
+}
+
+export function errorCustomerImpactEvidence(
+	impact: ErrorCustomerImpact,
+	signal: Pick<InvestigationSignal, "cohortMeasurement">
+): string {
+	const linked =
+		impact.identifiedProfiles > 0 || impact.linkedVisitorIdentifiers > 0;
 	const facts = [
 		impact.scope === "fingerprint"
 			? `This exact error produced ${countLabel(impact.errorOccurrences, "occurrence")} across ${countLabel(impact.affectedVisitorIdentifiers, "visitor identifier")} and ${countLabel(impact.affectedSessions, "session")}.`
 			: `Errors on this route produced ${countLabel(impact.errorOccurrences, "occurrence")} across ${countLabel(impact.affectedVisitorIdentifiers, "visitor identifier")} and ${countLabel(impact.affectedSessions, "session")}.`,
-		`${countLabel(impact.identifiedProfiles, "profile")} resolved from same-window session or visitor context. ${impact.linkedVisitorIdentifiers.toLocaleString("en-US")} of ${impact.affectedVisitorIdentifiers.toLocaleString("en-US")} non-empty visitor identifiers had an unambiguous same-window profile link; ${impact.unlinkedVisitorIdentifiers.toLocaleString("en-US")} did not.`,
+		linked
+			? `${countLabel(impact.identifiedProfiles, "profile")} resolved from same-window session or visitor context. ${impact.linkedVisitorIdentifiers.toLocaleString("en-US")} of ${impact.affectedVisitorIdentifiers.toLocaleString("en-US")} non-empty visitor identifiers had an unambiguous same-window profile link; ${impact.unlinkedVisitorIdentifiers.toLocaleString("en-US")} did not.`
+			: "No affected visitor identifier linked to an identified profile, so whether any affected visitor had paid is unknown.",
 	];
-	if (impact.routeContinuation) {
-		facts.splice(
-			1,
-			0,
-			`Among ${countLabel(impact.routeContinuation.exposedSessions, "error-exposed session")} and ${countLabel(impact.routeContinuation.controlSessions, "matched control session")} on the same route, day, device, and browser, ${impact.routeContinuation.exposedContinuationPercent.toLocaleString("en-US", { maximumFractionDigits: 1 })}% of exposed sessions later viewed a different page within 10 minutes, versus ${impact.routeContinuation.controlContinuationPercent.toLocaleString("en-US", { maximumFractionDigits: 1 })}% of controls (${impact.routeContinuation.percentagePointDifference.toLocaleString("en-US", { maximumFractionDigits: 1 })} percentage points). This is an association, not proof that the error caused the difference.`
-		);
+	if (impact.routeContinuation && !signal.cohortMeasurement) {
+		facts.splice(1, 0, routeContinuationSentence(impact.routeContinuation));
 	}
 	if (impact.identifiedProfilesWithPriorAttributedCompletedPayment > 0) {
 		facts.push(
 			`At least ${countLabel(impact.identifiedProfilesWithPriorAttributedCompletedPayment, "identified profile")} had an attributed completed payment before their first error in this period; unmatched payment status remains unknown.`
 		);
-	} else if (impact.qualifyingProfilePaymentHistoryObserved) {
+	} else if (linked && impact.qualifyingProfilePaymentHistoryObserved) {
 		facts.push(
 			"No prior payment match was found for the identified affected profiles despite other qualifying profile-attributed payment history; this does not establish that none paid."
 		);
-	} else {
+	} else if (linked) {
 		facts.push(
 			"No qualifying profile-attributed completed-payment history was observed, so affected payment status remains unknown."
 		);

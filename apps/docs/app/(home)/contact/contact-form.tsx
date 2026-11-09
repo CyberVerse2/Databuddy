@@ -223,7 +223,7 @@ export default function ContactForm() {
 				<FormField
 					error={errors.fullName?.message}
 					id="full-name"
-					label="Full Name"
+					label="Full name"
 					required
 				>
 					<Input
@@ -232,7 +232,7 @@ export default function ContactForm() {
 						className={errors.fullName ? "border-destructive" : ""}
 						id="full-name"
 						maxLength={100}
-						placeholder="Jane Doe"
+						placeholder="Your name"
 						type="text"
 						{...register("fullName")}
 					/>
@@ -241,7 +241,7 @@ export default function ContactForm() {
 				<FormField
 					error={errors.businessName?.message}
 					id="business-name"
-					label="Business or Website Name"
+					label="Business or website name"
 					required
 				>
 					<Input
@@ -250,7 +250,7 @@ export default function ContactForm() {
 						className={errors.businessName ? "border-destructive" : ""}
 						id="business-name"
 						maxLength={200}
-						placeholder="Acme Inc. or acme.com"
+						placeholder="Company name or website"
 						type="text"
 						{...register("businessName")}
 					/>
@@ -268,7 +268,7 @@ export default function ContactForm() {
 						className={errors.website ? "border-destructive" : ""}
 						id="domain"
 						maxLength={500}
-						placeholder="example.com"
+						placeholder="yourcompany.com"
 						type="text"
 						{...register("website")}
 					/>
@@ -277,7 +277,7 @@ export default function ContactForm() {
 				<FormField
 					error={errors.email?.message}
 					id="email"
-					label="Contact Email"
+					label="Contact email"
 					required
 				>
 					<Input
@@ -286,17 +286,17 @@ export default function ContactForm() {
 						className={errors.email ? "border-destructive" : ""}
 						id="email"
 						maxLength={255}
-						placeholder="jane@acme.com"
+						placeholder="you@company.com"
 						type="email"
 						{...register("email")}
 					/>
 				</FormField>
 
 				<FormField
-					description="Optional - we'll only call if needed"
+					description="Optional, and we'll only call if we need to."
 					error={errors.phone?.message}
 					id="phone"
-					label="Phone Number"
+					label="Phone number"
 				>
 					<Controller
 						control={control}
@@ -327,7 +327,7 @@ export default function ContactForm() {
 						) : (
 							<>
 								<PaperPlaneIcon className="size-4" />
-								Send Message
+								Send message
 							</>
 						)}
 					</SciFiButton>

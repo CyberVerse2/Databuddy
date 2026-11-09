@@ -4,7 +4,7 @@ import { isInvestigationPurchaseValid } from "./investigation-purchase";
 import { auth } from "@databuddy/auth";
 import { getRedisCache } from "@databuddy/redis";
 import { getAutumn, getBillingCustomerId, getMemberRole } from "@databuddy/rpc";
-import { AutumnError } from "autumn-js";
+import { AutumnError } from "@databuddy/rpc/autumn";
 import { autumnHandler } from "autumn-js/fetch";
 import { useLogger } from "evlog/elysia";
 import { withAutumnApiPath } from "@/lib/autumn-mount";
@@ -22,8 +22,24 @@ const FORBIDDEN_BODY_KEYS = new Set([
 	"returnUrl",
 	"cancelUrl",
 	"trialEnd",
+	"freeTrial",
+	"discounts",
+	"rewardId",
+	"version",
+	"carryOverBalances",
+	"carryOverUsages",
 	"billingCycleAnchor",
 	"prorationBehavior",
+]);
+
+const ALLOWED_AUTUMN_ROUTES = new Set([
+	"attach",
+	"getOrCreateCustomer",
+	"listPlans",
+	"openCustomerPortal",
+	"previewAttach",
+	"previewUpdateSubscription",
+	"updateSubscription",
 ]);
 
 function sanitize(value: JSONValue): JSONValue {
@@ -89,7 +105,10 @@ async function attachWithDubCustomer(
 		await invalidateAutumnCustomerCache(request);
 		return Response.json(result);
 	} catch (error) {
-		const statusCode = error instanceof AutumnError ? error.statusCode : 500;
+		const statusCode =
+			error instanceof AutumnError && error.statusCode >= 400
+				? error.statusCode
+				: 503;
 		let parsed: { message?: string; code?: string } = {};
 		if (error instanceof AutumnError) {
 			try {
@@ -176,30 +195,35 @@ async function writeAutumnCache(
 		.catch(() => {});
 }
 
+function autumnErrorResponse(code: "NOT_FOUND" | "VALIDATION") {
+	const response = buildHttpErrorResponse({ code, error: null });
+	return Response.json(response.payload, { status: response.status });
+}
+
 export async function handleAutumnRequest(request: Request) {
+	const segment = autumnPathSegment(request);
+	if (!ALLOWED_AUTUMN_ROUTES.has(segment)) {
+		return autumnErrorResponse("NOT_FOUND");
+	}
 	const sanitized = await stripPrivilegedBody(request);
-	const segment = autumnPathSegment(sanitized);
 	const identity = await identifyAutumnCustomer(sanitized).catch(() => null);
 	if (sanitized.method !== "GET" && sanitized.method !== "HEAD") {
 		const body: JSONValue = await sanitized
 			.clone()
 			.json()
 			.catch(() => null);
-		if (!isInvestigationPurchaseValid(body, segment)) {
-			const response = buildHttpErrorResponse({
-				code: "VALIDATION",
-				error: null,
-			});
-			return Response.json(response.payload, { status: response.status });
-		}
-		if (
+		const attachBody =
 			segment === "attach" &&
-			identity &&
-			body &&
+			body !== null &&
 			typeof body === "object" &&
 			!Array.isArray(body)
-		) {
-			return attachWithDubCustomer(sanitized, body, identity.customerId);
+				? body
+				: null;
+		if (!isInvestigationPurchaseValid(body, segment)) {
+			return autumnErrorResponse("VALIDATION");
+		}
+		if (attachBody && identity) {
+			return attachWithDubCustomer(sanitized, attachBody, identity.customerId);
 		}
 		// Expanded responses have a different shape from the plain customer cache.
 		if (

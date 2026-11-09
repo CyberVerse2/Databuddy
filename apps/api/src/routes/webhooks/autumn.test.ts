@@ -22,6 +22,14 @@ const state = vi.hoisted(() => ({
 		},
 	})),
 	cooldownConditions: [] as unknown[],
+	emailLinks: {
+		headers: {
+			"List-Unsubscribe": "<https://api.example.com/unsubscribe>",
+			"List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+		},
+		settingsUrl: "https://app.example.com/settings/notifications",
+		unsubscribeUrl: "https://api.example.com/unsubscribe",
+	},
 	inserted: [] as Record<string, unknown>[],
 	insertFailure: null as Error | null,
 	log: {
@@ -148,6 +156,7 @@ vi.mock("@databuddy/db", () => ({
 			user: { findFirst: vi.fn(async () => state.userRow) },
 		},
 	},
+	emailUnsubscribeLinks: () => state.emailLinks,
 	eq: (field: unknown, value: unknown) => ({ field, op: "eq", value }),
 	gt: (field: unknown, value: unknown) => ({ field, op: "gt", value }),
 	isNull: (field: unknown) => ({ field, op: "isNull" }),
@@ -206,16 +215,26 @@ vi.mock("@databuddy/db/schema", () => ({
 	},
 }));
 
-vi.mock("@databuddy/email", () => ({
+vi.mock("@databuddy/email", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@databuddy/email")>()),
 	render: vi.fn(async () => "<html />"),
 	UsageAlertEmail: vi.fn(() => ({ type: "usage" })),
 	UsageLimitEmail: vi.fn(() => ({ type: "limit" })),
 }));
 
-vi.mock("@databuddy/env/app", async (importOriginal) => ({
-	...(await importOriginal<typeof import("@databuddy/env/app")>()),
-	config: { email: { alertsFrom: "alerts@databuddy.cc" } },
-}));
+vi.mock("@databuddy/env/app", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@databuddy/env/app")>();
+	return {
+		...actual,
+		config: {
+			email: { alertsFrom: "alerts@databuddy.cc" },
+			urls: actual.config.urls,
+			get services() {
+				return actual.config.services;
+			},
+		},
+	};
+});
 
 vi.mock("@databuddy/notifications", () => ({
 	SlackProvider: class {
@@ -327,6 +346,7 @@ describe("sendAlertEmail", () => {
 			alertType: "included",
 			cooldownKey: "events",
 			customerId: "user-1",
+			links: state.emailLinks,
 			organizationId: "org-1",
 			react: { type: "email" } as never,
 			recipient: { email: "member@example.com" },
@@ -364,6 +384,7 @@ describe("sendAlertEmail", () => {
 			alertType: "included",
 			cooldownKey: "events",
 			customerId: "user-1",
+			links: state.emailLinks,
 			organizationId: "org-1",
 			react: { type: "email" } as never,
 			recipient: { email: "member@example.com" },
@@ -384,6 +405,7 @@ describe("sendAlertEmail", () => {
 			subject: "Limit reached",
 			html: "<html />",
 			text: "<html />",
+			headers: state.emailLinks.headers,
 		});
 		expect(state.inserted).toEqual([
 			expect.objectContaining({
@@ -406,6 +428,7 @@ describe("sendAlertEmail", () => {
 			alertType: "included",
 			cooldownKey: "events",
 			customerId: "user-1",
+			links: state.emailLinks,
 			organizationId: "org-1",
 			react: { type: "email" } as never,
 			recipient: { email: "member@example.com" },
@@ -427,6 +450,7 @@ describe("sendAlertEmail", () => {
 			alertType: "included",
 			cooldownKey: "events",
 			customerId: "user-1",
+			links: state.emailLinks,
 			organizationId: "org-1",
 			react: { type: "email" } as never,
 			recipient: { email: "member@example.com" },
@@ -581,7 +605,7 @@ describe("Autumn usage emails", () => {
 		);
 		expect(state.send).toHaveBeenCalledWith(
 			expect.objectContaining({
-				subject: "[Action required] AI credits limit reached",
+				subject: "[Action required] AI credits: Paused at your spending limit",
 			})
 		);
 	});

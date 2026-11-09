@@ -73,6 +73,8 @@ mock.module("@databuddy/db", () => ({
 	db: { select, transaction },
 }));
 mock.module("@databuddy/redis", () => ({
+	cacheable: <T>(fn: T) => fn,
+	cacheNamespaces: {},
 	enqueueInsightsResume: enqueue,
 	getInsightsQueue: mock(),
 	insightsResumeJobId: mock(),
@@ -89,6 +91,7 @@ mock.module("../lib/logger", () => ({
 	logger: { error: mock(), warn: mock() },
 }));
 mock.module("../procedures/with-workspace", () => ({
+	hasAccess: mock(),
 	withWorkspace: authorize,
 }));
 mock.module("../utils/billing", () => ({ getBillingCustomerId: mock() }));
@@ -97,6 +100,7 @@ mock.module("../orpc", () => ({
 	auditedProcedure: procedure,
 	auditedSessionProcedure: procedure,
 	protectedProcedure: procedure,
+	publicProcedure: procedure,
 }));
 const {
 	appendInvestigationReply,
@@ -170,7 +174,7 @@ for (const [name, reply] of [
 		await expect(reply()).rejects.toMatchObject({
 			code: "BAD_REQUEST",
 			message:
-				"Ask your administrator to configure AI before continuing an investigation.",
+				"AI is not set up on this Databuddy instance. Ask your administrator to configure it before continuing an investigation.",
 		});
 		expect(authorize).toHaveBeenCalledWith(context, {
 			allowCrossOrg: true,

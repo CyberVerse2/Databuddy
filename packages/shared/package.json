@@ -11,6 +11,7 @@
     "./audit": "./src/audit.ts",
     "./billing": "./src/billing.ts",
     "./bot-detection": "./src/utils/bot-detection/index.ts",
+    "./bot-detection/ai-agents": "./src/utils/bot-detection/ai-agents.ts",
     "./bot-detection/detector": "./src/utils/bot-detection/detector.ts",
     "./bot-detection/types": "./src/utils/bot-detection/types.ts",
     "./bot-detection/user-agent": "./src/utils/bot-detection/user-agent.ts",
@@ -25,24 +26,31 @@
     "./evlog-superlog": "./src/evlog-superlog.ts",
     "./flags": "./src/flags/index.ts",
     "./http-error-response": "./src/http-error-response.ts",
+    "./import": "./src/import/index.ts",
+    "./import/records": "./src/import/records.ts",
     "./insights": "./src/insights.ts",
     "./json-ld": "./src/json-ld.ts",
     "./ssrf-guard": "./src/ssrf-guard.ts",
     "./stripe-webhooks": "./src/stripe-webhooks.ts",
     "./tracking-blocks": "./src/tracking-blocks.ts",
     "./types/features": "./src/types/features.ts",
+    "./uploads": "./src/uploads.ts",
     "./uptime": "./src/uptime.ts",
     "./uptime-status": "./src/uptime-status.ts",
     "./utils/client-ip": "./src/utils/client-ip.ts",
     "./utils/referrer": "./src/utils/referrer.ts",
-    "./organization-business-context": "./src/organization-business-context.ts"
+    "./organization-business-context": "./src/organization-business-context.ts",
+    "./mcp-access": "./src/mcp-access.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",
-    "test": "bun test src"
+    "test": "bun test src",
+    "bots:sync": "curl -fsSL https://raw.githubusercontent.com/arcjet/well-known-bots/main/well-known-bots.json -o src/utils/bot-detection/well-known-bots.json && bun test src/utils/bot-detection"
   },
   "dependencies": {
+    "@databuddy/env": "workspace:*",
     "evlog": "catalog:",
+    "jszip": "^3.10.2",
     "ua-parser-js": "catalog:",
     "undici": "^8.2.0",
     "zod": "catalog:"

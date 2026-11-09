@@ -13,6 +13,16 @@ const VITALS_P50_METRICS = `
 	COUNT(*) as samples
 `;
 
+const VITALS_DIMENSION_FILTERS = [
+	"path",
+	"country",
+	"region",
+	"city",
+	"browser_name",
+	"os_name",
+	"device_type",
+];
+
 interface VitalsByDimensionConfig {
 	defaultLimit: number;
 	extraWhere: string;
@@ -40,7 +50,14 @@ function vitalsByDimension(config: VitalsByDimensionConfig): CustomSqlFn {
 		// qualified (sd.country), so scan them too before pruning the CTE.
 		const sdText = `${staticSdText} ${filterConditions?.join(" ") ?? ""}`;
 		const sdDims = (
-			["browser_name", "country", "region", "city"] as const
+			[
+				"browser_name",
+				"country",
+				"region",
+				"city",
+				"os_name",
+				"device_type",
+			] as const
 		).filter((d) => sdText.includes(d));
 		const withCte = needsSd ? `WITH ${sessionDimensionsCte(sdDims)}` : "";
 		const joinSd = needsSd
@@ -96,7 +113,7 @@ const VITALS_P50_FIELDS = [
 	{ name: "samples", type: "number" as const, label: "Samples" },
 ];
 
-export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
+export const VitalsBuilders = {
 	vitals_overview: {
 		meta: {
 			title: "Vitals Overview",
@@ -148,6 +165,7 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 				params: { websiteId, startDate, endDate },
 			};
 		},
+		commonFilters: false,
 		timeField: "timestamp",
 		customizable: false,
 	},
@@ -169,7 +187,6 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 				{ name: "samples", type: "number", label: "Samples" },
 			],
 			default_visualization: "timeseries",
-			supports_granularity: ["hour", "day"],
 		},
 		customSql: (ctx) => {
 			const { websiteId, startDate, endDate } = ctx;
@@ -179,7 +196,7 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 					_q[4] as p95, _q[5] as p99, samples
 				FROM (
 					SELECT
-						toDate(timestamp) as date,
+						toDate(toTimeZone(timestamp, {timezone:String})) as date,
 						metric_name,
 						quantilesTDigest(0.50, 0.75, 0.90, 0.95, 0.99)(metric_value) as _q,
 						count() as samples
@@ -195,6 +212,7 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 				params: { websiteId, startDate, endDate },
 			};
 		},
+		commonFilters: false,
 		timeField: "timestamp",
 		customizable: false,
 	},
@@ -230,6 +248,8 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 			extraWhere: "wv.path != ''",
 			defaultLimit: 50,
 		}),
+		commonFilters: false,
+		allowedFilters: VITALS_DIMENSION_FILTERS,
 		timeField: "timestamp",
 		customizable: true,
 	},
@@ -249,6 +269,8 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 			extraWhere: "ifNull(sd.country, '') != ''",
 			defaultLimit: 100,
 		}),
+		commonFilters: false,
+		allowedFilters: VITALS_DIMENSION_FILTERS,
 		timeField: "timestamp",
 		customizable: true,
 		plugins: { normalizeGeo: true, deduplicateGeo: true },
@@ -269,6 +291,8 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 			extraWhere: "ifNull(sd.browser_name, '') != ''",
 			defaultLimit: 100,
 		}),
+		commonFilters: false,
+		allowedFilters: VITALS_DIMENSION_FILTERS,
 		timeField: "timestamp",
 		customizable: true,
 	},
@@ -289,6 +313,8 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 			extraWhere: "ifNull(sd.region, '') != ''",
 			defaultLimit: 100,
 		}),
+		commonFilters: false,
+		allowedFilters: VITALS_DIMENSION_FILTERS,
 		timeField: "timestamp",
 		customizable: true,
 		plugins: { normalizeGeo: true, deduplicateGeo: true },
@@ -310,8 +336,10 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 			extraWhere: "ifNull(sd.city, '') != ''",
 			defaultLimit: 100,
 		}),
+		commonFilters: false,
+		allowedFilters: VITALS_DIMENSION_FILTERS,
 		timeField: "timestamp",
 		customizable: true,
 		plugins: { normalizeGeo: true, deduplicateGeo: true },
 	},
-};
+} satisfies Record<string, SimpleQueryConfig>;

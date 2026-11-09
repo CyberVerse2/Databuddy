@@ -74,7 +74,7 @@ export function TransferToOrgDialog({
 				<Dialog.Body className="space-y-4">
 					<div className="space-y-2">
 						<span className="font-medium text-foreground text-xs">
-							Current Organization
+							Current organization
 						</span>
 						<div className="flex items-center gap-2.5 rounded border bg-secondary p-2.5">
 							<img
@@ -141,9 +141,9 @@ export function TransferToOrgDialog({
 					{children}
 
 					{!isLoadingOrgs && availableOrgs.length === 0 ? (
-						<div className="flex items-start gap-2 rounded border border-orange-200 bg-orange-50 p-3 text-orange-800 dark:border-orange-800 dark:bg-orange-950/20 dark:text-orange-200">
-							<WarningIcon className="mt-0.5 size-4 shrink-0" />
-							<p className="text-xs">
+						<div className="flex items-start gap-2 rounded border bg-card p-3">
+							<WarningIcon className="mt-0.5 size-4 shrink-0 text-warning" />
+							<p className="text-muted-foreground text-xs">
 								No other organizations available. Create a new organization or
 								get invited to one to transfer.
 							</p>
@@ -151,9 +151,9 @@ export function TransferToOrgDialog({
 					) : null}
 
 					{selectedOrg && warning ? (
-						<div className="flex items-start gap-2 rounded border border-orange-200 bg-orange-50 p-3 text-orange-800 dark:border-orange-800 dark:bg-orange-950/20 dark:text-orange-200">
-							<WarningIcon className="mt-0.5 size-4 shrink-0" />
-							<p className="text-xs">
+						<div className="flex items-start gap-2 rounded border bg-card p-3">
+							<WarningIcon className="mt-0.5 size-4 shrink-0 text-warning" />
+							<p className="text-muted-foreground text-xs">
 								{warning.replace("{orgName}", selectedOrg.name)}
 							</p>
 						</div>

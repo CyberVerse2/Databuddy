@@ -38,7 +38,9 @@ function TransferPageContent() {
 
 		const targetOrg = organizations?.find((org) => org.id === selectedOrgId);
 		if (!targetOrg) {
-			toast.error("Selected organization not found");
+			toast.error(
+				"That organization is no longer available. Pick another one."
+			);
 			return;
 		}
 
@@ -95,7 +97,7 @@ function TransferPageContent() {
 		(org: Organization) => org.id === websiteOrgId
 	) || {
 		id: websiteOrgId ?? "",
-		name: "Current Organization",
+		name: "Current organization",
 		slug: "",
 		logo: null as string | null,
 		createdAt: new Date(),
@@ -115,7 +117,7 @@ function TransferPageContent() {
 				<div className="mx-auto max-w-4xl space-y-6 p-5">
 					<Card>
 						<Card.Header>
-							<Card.Title>Transfer Website</Card.Title>
+							<Card.Title>Transfer website</Card.Title>
 							<Card.Description>
 								Move this website to a different organization
 							</Card.Description>
@@ -155,7 +157,7 @@ function TransferPageContent() {
 
 					<Card>
 						<Card.Header>
-							<Card.Title>Target Organization</Card.Title>
+							<Card.Title>Target organization</Card.Title>
 							<Card.Description>
 								Select where to transfer this website
 							</Card.Description>
@@ -209,7 +211,7 @@ function TransferPageContent() {
 					</Card>
 
 					{selectedOrgId && (
-						<Alert className="border-orange-200 bg-orange-50 text-orange-800 dark:border-orange-800 dark:bg-orange-950/20 dark:text-orange-200">
+						<Alert className="[&>svg]:text-warning">
 							<WarningIcon className="size-4" />
 							<AlertDescription className="text-xs">
 								<div>
@@ -239,7 +241,7 @@ function TransferPageContent() {
 					size="sm"
 				>
 					<ArrowSquareOutIcon className="size-4" />
-					Transfer Website
+					Transfer website
 				</Button>
 			</div>
 
@@ -247,7 +249,7 @@ function TransferPageContent() {
 				<Dialog.Content>
 					<Dialog.Close />
 					<Dialog.Header>
-						<Dialog.Title>Confirm Website Transfer</Dialog.Title>
+						<Dialog.Title>Confirm website transfer</Dialog.Title>
 						<Dialog.Description>
 							This action cannot be undone.
 						</Dialog.Description>
@@ -298,8 +300,8 @@ function TransferPageContent() {
 								<ArrowRightIcon className="size-4 rotate-90 text-muted-foreground" />
 							</div>
 
-							<div className="flex items-center gap-2.5 rounded border border-primary/30 bg-primary/5 p-2.5">
-								<div className="flex size-8 shrink-0 items-center justify-center rounded border border-primary/30 bg-background">
+							<div className="flex items-center gap-2.5 rounded border bg-card p-2.5">
+								<div className="flex size-8 shrink-0 items-center justify-center rounded border bg-background">
 									{selectedOrg?.logo ? (
 										<img
 											alt={selectedOrg.name}
@@ -309,12 +311,12 @@ function TransferPageContent() {
 											width={32}
 										/>
 									) : (
-										<BuildingsIcon className="size-4 text-primary" />
+										<BuildingsIcon className="size-4 text-muted-foreground" />
 									)}
 								</div>
 								<div className="min-w-0 flex-1">
 									<p className="text-muted-foreground text-xs">To</p>
-									<p className="truncate font-medium text-primary text-sm">
+									<p className="truncate font-medium text-sm">
 										{selectedOrg?.name}
 									</p>
 								</div>
@@ -340,7 +342,7 @@ function TransferPageContent() {
 						</Button>
 						<Button loading={isTransferring} onClick={handleTransfer}>
 							<ArrowSquareOutIcon className="size-4" />
-							Confirm Transfer
+							Confirm transfer
 						</Button>
 					</Dialog.Footer>
 				</Dialog.Content>

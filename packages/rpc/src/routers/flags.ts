@@ -4,6 +4,7 @@ import {
 	eq,
 	inArray,
 	isNull,
+	isUniqueViolationFor,
 	ne,
 	notDeleted,
 	withTransaction,
@@ -12,6 +13,8 @@ import { chQuery } from "@databuddy/db/clickhouse";
 import {
 	buildFlagChangeSnapshot,
 	flagChangeEvents,
+	type FlagChangeEvents,
+	type Flags,
 	type FlagUserRule,
 	type TargetGroups,
 	flags,
@@ -38,9 +41,9 @@ import type { Context } from "../orpc";
 import { publicProcedure, trackedProcedure } from "../orpc";
 import { setTrackProperties } from "../middleware/track-mutation";
 import {
+	type AuthedWorkspace,
 	type AuthedWorkspaceWithPlan,
 	type Workspace,
-	withPublicWorkspace,
 	withWorkspace,
 } from "../procedures/with-workspace";
 import {
@@ -54,7 +57,9 @@ const CACHE_DURATION = 60;
 
 function requireCondition(condition: ReturnType<typeof and>) {
 	if (!condition) {
-		throw new Error("Expected flag filter conditions");
+		throw new Error(
+			"The feature flag filters could not be read. Refresh the page and try again."
+		);
 	}
 	return condition;
 }
@@ -65,7 +70,7 @@ const flagScopeFields = {
 };
 
 const SCOPE_REQUIRED_ERROR =
-	"Either websiteId or organizationId must be provided";
+	"Choose a website or an organization for this feature flag.";
 
 const requireScope = <
 	T extends { websiteId?: string; organizationId?: string },
@@ -75,39 +80,95 @@ const requireScope = <
 
 const scopeRefinement = { message: SCOPE_REQUIRED_ERROR, path: ["websiteId"] };
 
-function authorizeFlagRead(
-	context: Context,
-	scope: { websiteId?: string; organizationId?: string }
-): Promise<Workspace> {
-	if (scope.websiteId) {
-		return withPublicWorkspace(context, {
-			websiteId: scope.websiteId,
-			resource: "flag",
-			permissions: ["read"],
-		});
+const VARIANT_WEIGHTS_ERROR =
+	"Variant weights must add up to 100%. Adjust them and try again.";
+
+function hasUnbalancedVariantWeights(
+	variants: readonly { weight?: number }[]
+): boolean {
+	if (!variants.some((variant) => typeof variant.weight === "number")) {
+		return false;
 	}
-	if (!scope.organizationId) {
-		throw rpcError.badRequest(SCOPE_REQUIRED_ERROR);
-	}
-	return withWorkspace(context, {
-		organizationId: scope.organizationId,
-		resource: "flag",
-		permissions: ["read"],
-	});
+	const totalWeight = variants.reduce(
+		(sum, variant) => sum + (variant.weight ?? 0),
+		0
+	);
+	return totalWeight !== 100;
 }
 
-function requireAuthedFlagRead(workspace: Workspace) {
-	if (workspace.tier === "demo") {
-		throw rpcError.unauthorized(
-			"Feature flag definitions require authenticated organization access"
+async function authorizeFlagRead(
+	context: Context,
+	scope: { websiteId?: string; organizationId?: string }
+): Promise<AuthedWorkspace> {
+	if (!(scope.websiteId || scope.organizationId)) {
+		throw rpcError.badRequest(SCOPE_REQUIRED_ERROR);
+	}
+	return scope.websiteId
+		? await withWorkspace(context, {
+				websiteId: scope.websiteId,
+				resource: "flag",
+				permissions: ["read"],
+			})
+		: await withWorkspace(context, {
+				organizationId: scope.organizationId,
+				resource: "flag",
+				permissions: ["read"],
+			});
+}
+
+type Transaction = Parameters<Parameters<typeof withTransaction>[0]>[0];
+
+async function linkTargetGroups(
+	tx: Transaction,
+	flagId: string,
+	websiteId: string | null | undefined,
+	targetGroupIds: string[]
+) {
+	if (targetGroupIds.length === 0) {
+		return;
+	}
+	const validGroups = await tx.query.targetGroups.findMany({
+		where: {
+			id: { in: targetGroupIds },
+			websiteId: websiteId || "",
+			deletedAt: { isNull: true },
+		},
+	});
+	if (validGroups.length !== targetGroupIds.length) {
+		throw rpcError.badRequest(
+			"One or more target groups were not found on this website. They may have been deleted. Refresh the page and try again."
 		);
 	}
+	await tx
+		.insert(flagsToTargetGroups)
+		.values(targetGroupIds.map((targetGroupId) => ({ flagId, targetGroupId })));
+}
+
+function recordFlagChange(
+	tx: Transaction,
+	changeType: FlagChangeEvents["changeType"],
+	before: Flags | null,
+	after: Flags,
+	changedBy: string
+) {
+	return tx.insert(flagChangeEvents).values({
+		id: randomUUIDv7(),
+		flagId: after.id,
+		websiteId: after.websiteId,
+		organizationId: after.organizationId,
+		changeType,
+		before: before && buildFlagChangeSnapshot(before),
+		after: buildFlagChangeSnapshot(after),
+		changedBy,
+	});
 }
 
 const listFlagsSchema = z
 	.object({
 		...flagScopeFields,
 		status: z.enum(["active", "inactive", "archived"]).optional(),
+		limit: z.number().int().min(1).max(200).default(200),
+		offset: z.number().int().min(0).default(0),
 	})
 	.refine(requireScope, scopeRefinement);
 
@@ -137,52 +198,40 @@ const createFlagSchema = z
 		persistAcrossAuth: z.boolean().optional(),
 		...flagFormShape,
 	})
-	.refine(requireScope, scopeRefinement);
+	.refine(requireScope, scopeRefinement)
+	.refine(
+		(data) =>
+			!(
+				data.type === "multivariant" &&
+				data.variants &&
+				hasUnbalancedVariantWeights(data.variants)
+			),
+		{ message: VARIANT_WEIGHTS_ERROR, path: ["variants"] }
+	);
 
-const updateFlagSchema = z
-	.object({
-		id: z.string(),
-		name: z.string().min(1).max(100).optional(),
-		description: z.string().optional(),
-		type: z.enum(["boolean", "rollout", "multivariant"]).optional(),
-		status: z.enum(["active", "inactive", "archived"]).optional(),
-		defaultValue: z.boolean().optional(),
-		payload: z
-			.record(z.string(), z.unknown())
-			.refine(
-				(obj) => JSON.stringify(obj).length <= 32_768,
-				"Payload too large (max 32KB)"
-			)
-			.optional(),
-		rules: z.array(userRuleSchema).optional(),
-		persistAcrossAuth: z.boolean().optional(),
-		rolloutPercentage: z.number().min(0).max(100).optional(),
-		rolloutBy: z.string().optional(),
-		variants: z.array(variantSchema).optional(),
-		dependencies: z.array(z.string()).optional(),
-		environment: z.string().optional(),
-		targetGroupIds: z.array(z.string()).optional(),
-	})
-	.superRefine((data, ctx) => {
-		if (data.type === "multivariant" && data.variants) {
-			const hasAnyWeight = data.variants.some(
-				(v) => typeof v.weight === "number"
-			);
-			if (hasAnyWeight) {
-				const totalWeight = data.variants.reduce(
-					(sum, v) => sum + (typeof v.weight === "number" ? v.weight : 0),
-					0
-				);
-				if (totalWeight !== 100) {
-					ctx.addIssue({
-						code: z.ZodIssueCode.custom,
-						path: ["variants"],
-						message: "When specifying weights, they must sum to 100%",
-					});
-				}
-			}
-		}
-	});
+const updateFlagSchema = z.object({
+	id: z.string(),
+	name: z.string().min(1).max(100).optional(),
+	description: z.string().optional(),
+	type: z.enum(["boolean", "rollout", "multivariant"]).optional(),
+	status: z.enum(["active", "inactive", "archived"]).optional(),
+	defaultValue: z.boolean().optional(),
+	payload: z
+		.record(z.string(), z.unknown())
+		.refine(
+			(obj) => JSON.stringify(obj).length <= 32_768,
+			"Payload too large (max 32KB)"
+		)
+		.optional(),
+	rules: z.array(userRuleSchema).optional(),
+	persistAcrossAuth: z.boolean().optional(),
+	rolloutPercentage: z.number().min(0).max(100).optional(),
+	rolloutBy: z.string().optional(),
+	variants: z.array(variantSchema).optional(),
+	dependencies: z.array(z.string()).optional(),
+	environment: z.string().nullable().optional(),
+	targetGroupIds: z.array(z.string()).optional(),
+});
 
 const checkCircularDependency = async (
 	context: Context,
@@ -201,18 +250,10 @@ const checkCircularDependency = async (
 			and(getScopeCondition(websiteId, organizationId), isNull(flags.deletedAt))
 		);
 
-	const graph = new Map<string, string[]>();
-	for (const flag of allFlags) {
-		if (flag.key === targetFlagKey) {
-			graph.set(flag.key, proposedDependencies);
-		} else {
-			graph.set(flag.key, (flag.dependencies as string[]) || []);
-		}
-	}
-
-	if (!graph.has(targetFlagKey)) {
-		graph.set(targetFlagKey, proposedDependencies);
-	}
+	const graph = new Map(
+		allFlags.map((flag) => [flag.key, flag.dependencies ?? []])
+	);
+	graph.set(targetFlagKey, proposedDependencies);
 
 	const visited = new Set<string>();
 	const recursionStack = new Set<string>();
@@ -239,7 +280,7 @@ const checkCircularDependency = async (
 
 	if (hasCycle(targetFlagKey)) {
 		throw rpcError.badRequest(
-			`Circular dependency detected involving flag "${targetFlagKey}".`
+			`Feature flag "${targetFlagKey}" would end up depending on itself. Remove one of the dependencies and try again.`
 		);
 	}
 };
@@ -268,7 +309,7 @@ const flagRulesOutputSchema = z.array(flagRuleOutputSchema);
 const flagTargetGroupOutputSchema = z.object({
 	color: z.string(),
 	createdAt: z.coerce.date(),
-	createdBy: z.string(),
+	createdBy: z.string().nullable(),
 	deletedAt: z.coerce.date().nullable(),
 	description: z.string().nullable(),
 	id: z.string(),
@@ -280,7 +321,7 @@ const flagTargetGroupOutputSchema = z.object({
 
 const flagOutputSchema = z.object({
 	createdAt: z.coerce.date(),
-	createdBy: z.string(),
+	createdBy: z.string().nullable(),
 	defaultValue: z.boolean(),
 	deletedAt: z.coerce.date().nullable(),
 	dependencies: z.array(z.string()).nullable(),
@@ -327,7 +368,6 @@ export const flagsRouter = {
 		.output(z.array(flagOutputSchema))
 		.handler(async ({ context, input }) => {
 			const workspace = await authorizeFlagRead(context, input);
-			requireAuthedFlagRead(workspace);
 			const scope = getScope(input.websiteId, input.organizationId);
 
 			return flagsCache.withCache({
@@ -335,7 +375,7 @@ export const flagsRouter = {
 					"list",
 					workspace,
 					scope,
-					`status:${input.status || "all"}`
+					`status:${input.status || "all"}:limit:${input.limit}:offset:${input.offset}`
 				),
 				ttl: CACHE_DURATION,
 				tables: ["flags", "flags_to_target_groups", "target_groups"],
@@ -359,7 +399,8 @@ export const flagsRouter = {
 							},
 						},
 						orderBy: { createdAt: "desc" },
-						limit: 200,
+						limit: input.limit,
+						offset: input.offset,
 						with: { flagsToTargetGroups: { with: { targetGroup: true } } },
 					});
 
@@ -380,8 +421,7 @@ export const flagsRouter = {
 		.input(flagStatsSchema)
 		.output(z.array(flagStatsOutputSchema))
 		.handler(async ({ context, input }) => {
-			const workspace = await authorizeFlagRead(context, input);
-			requireAuthedFlagRead(workspace);
+			await authorizeFlagRead(context, input);
 			const scopedFlags = await context.db
 				.select({ key: flags.key })
 				.from(flags)
@@ -462,7 +502,6 @@ export const flagsRouter = {
 		.output(flagOutputSchema)
 		.handler(async ({ context, input }) => {
 			const workspace = await authorizeFlagRead(context, input);
-			requireAuthedFlagRead(workspace);
 			const scope = getScope(input.websiteId, input.organizationId);
 
 			return flagsCache.withCache({
@@ -510,7 +549,6 @@ export const flagsRouter = {
 		.output(flagOutputSchema)
 		.handler(async ({ context, input }) => {
 			const workspace = await authorizeFlagRead(context, input);
-			requireAuthedFlagRead(workspace);
 			const scope = getScope(input.websiteId, input.organizationId);
 
 			return flagsCache.withCache({
@@ -560,7 +598,7 @@ export const flagsRouter = {
 		.handler(async ({ context, input }) => {
 			setTrackProperties({ type: input.type });
 			const wsId = input.websiteId;
-			const orgId = input.organizationId;
+			const orgId = wsId ? undefined : input.organizationId;
 
 			const workspace = wsId
 				? await withWorkspace(context, {
@@ -583,7 +621,7 @@ export const flagsRouter = {
 				.from(flags)
 				.where(
 					and(
-						getScopeCondition(input.websiteId, input.organizationId),
+						getScopeCondition(input.websiteId, orgId),
 						isNull(flags.deletedAt),
 						ne(flags.status, "archived")
 					)
@@ -601,7 +639,7 @@ export const flagsRouter = {
 					input.key,
 					input.dependencies,
 					input.websiteId,
-					input.organizationId
+					orgId
 				);
 			}
 
@@ -613,7 +651,7 @@ export const flagsRouter = {
 						.where(
 							and(
 								inArray(flags.key, dependencyKeys),
-								getScopeCondition(input.websiteId, input.organizationId),
+								getScopeCondition(input.websiteId, orgId),
 								isNull(flags.deletedAt)
 							)
 						)
@@ -621,17 +659,17 @@ export const flagsRouter = {
 
 			if (dependencyFlags.length !== dependencyKeys.length) {
 				throw rpcError.badRequest(
-					"One or more dependency flags were not found in this scope"
+					"One or more feature flags this depends on were not found. They may have been deleted. Refresh the page and try again."
 				);
 			}
 
-			const existingFlag = await context.db
+			const [existingFlag] = await context.db
 				.select()
 				.from(flags)
 				.where(
 					and(
 						eq(flags.key, input.key),
-						getScopeCondition(input.websiteId, input.organizationId)
+						getScopeCondition(input.websiteId, orgId)
 					)
 				)
 				.limit(1);
@@ -641,81 +679,59 @@ export const flagsRouter = {
 			);
 
 			const finalStatus = hasInactiveDependency ? "inactive" : input.status;
-			if (existingFlag.length > 0) {
-				if (!existingFlag[0].deletedAt) {
+			const flagFields = {
+				name: input.name || null,
+				description: input.description || null,
+				type: input.type,
+				status: finalStatus,
+				defaultValue: input.defaultValue,
+				payload: input.payload || null,
+				rules: input.rules || [],
+				persistAcrossAuth: input.persistAcrossAuth ?? false,
+				rolloutPercentage: input.rolloutPercentage || 0,
+				rolloutBy: input.rolloutBy || null,
+				variants: input.variants || [],
+				dependencies: input.dependencies || [],
+				websiteId: input.websiteId || null,
+				organizationId: orgId || null,
+				environment: input.environment || null,
+			};
+			if (existingFlag) {
+				if (!existingFlag.deletedAt) {
 					throw rpcError.conflict(
-						"A flag with this key already exists in this scope"
+						"A feature flag with this key already exists. Pick a different key."
 					);
 				}
 
 				const restoredFlag = await withTransaction(async (tx) => {
 					const [restored] = await tx
 						.update(flags)
-						.set({
-							name: input.name,
-							description: input.description,
-							type: input.type,
-							status: finalStatus,
-							defaultValue: input.defaultValue,
-							rules: input.rules,
-							persistAcrossAuth:
-								input.persistAcrossAuth ??
-								existingFlag[0].persistAcrossAuth ??
-								false,
-							rolloutPercentage: input.rolloutPercentage,
-							rolloutBy: input.rolloutBy,
-							variants: input.variants,
-							dependencies: input.dependencies,
-							environment: input.environment,
-							deletedAt: null,
-							updatedAt: new Date(),
-						})
-						.where(eq(flags.id, existingFlag[0].id))
+						.set({ ...flagFields, deletedAt: null, updatedAt: new Date() })
+						.where(eq(flags.id, existingFlag.id))
 						.returning();
 
-					await tx
-						.delete(flagsToTargetGroups)
-						.where(eq(flagsToTargetGroups.flagId, existingFlag[0].id));
-
-					if (input.targetGroupIds && input.targetGroupIds.length > 0) {
-						const ids = input.targetGroupIds;
-						const validGroups = await tx.query.targetGroups.findMany({
-							where: {
-								RAW: (t) =>
-									requireCondition(
-										and(
-											inArray(t.id, ids),
-											eq(t.websiteId, input.websiteId || ""),
-											isNull(t.deletedAt)
-										)
-									),
-							},
-						});
-
-						if (validGroups.length !== input.targetGroupIds.length) {
-							throw rpcError.badRequest(
-								"One or more target groups not found or do not belong to this website"
-							);
-						}
-
-						await tx.insert(flagsToTargetGroups).values(
-							input.targetGroupIds.map((targetGroupId) => ({
-								flagId: existingFlag[0].id,
-								targetGroupId,
-							}))
+					if (!restored) {
+						throw rpcError.conflict(
+							"The feature flag changed while it was being restored. Try again in a moment."
 						);
 					}
 
-					await tx.insert(flagChangeEvents).values({
-						id: randomUUIDv7(),
-						flagId: restored.id,
-						websiteId: restored.websiteId,
-						organizationId: restored.organizationId,
-						changeType: "restored",
-						before: buildFlagChangeSnapshot(existingFlag[0]),
-						after: buildFlagChangeSnapshot(restored),
-						changedBy: createdBy,
-					});
+					await tx
+						.delete(flagsToTargetGroups)
+						.where(eq(flagsToTargetGroups.flagId, existingFlag.id));
+					await linkTargetGroups(
+						tx,
+						existingFlag.id,
+						input.websiteId,
+						input.targetGroupIds ?? []
+					);
+					await recordFlagChange(
+						tx,
+						"restored",
+						existingFlag,
+						restored,
+						createdBy
+					);
 
 					return restored;
 				});
@@ -723,7 +739,7 @@ export const flagsRouter = {
 				await invalidateFlagCache(
 					restoredFlag.id,
 					input.websiteId,
-					input.organizationId,
+					orgId,
 					input.key
 				);
 
@@ -739,75 +755,40 @@ export const flagsRouter = {
 					.values({
 						id: flagId,
 						key: input.key,
-						name: input.name || null,
-						description: input.description || null,
-						type: input.type,
-						status: finalStatus,
-						defaultValue: input.defaultValue,
-						payload: input.payload || null,
-						rules: input.rules || [],
-						persistAcrossAuth: input.persistAcrossAuth ?? false,
-						rolloutPercentage: input.rolloutPercentage || 0,
-						rolloutBy: input.rolloutBy || null,
-						variants: input.variants || [],
-						dependencies: input.dependencies || [],
-						websiteId: input.websiteId || null,
-						organizationId: input.organizationId || null,
-						environment: input.environment || existingFlag?.[0]?.environment,
+						...flagFields,
 						userId: null,
 						createdBy,
 					})
 					.returning();
 
-				if (input.targetGroupIds && input.targetGroupIds.length > 0) {
-					const ids = input.targetGroupIds;
-					const validGroups = await tx.query.targetGroups.findMany({
-						where: {
-							RAW: (t) =>
-								requireCondition(
-									and(
-										inArray(t.id, ids),
-										eq(t.websiteId, input.websiteId || ""),
-										isNull(t.deletedAt)
-									)
-								),
-						},
-					});
-
-					if (validGroups.length !== input.targetGroupIds.length) {
-						throw rpcError.badRequest(
-							"One or more target groups not found or do not belong to this website"
-						);
-					}
-
-					await tx.insert(flagsToTargetGroups).values(
-						input.targetGroupIds.map((targetGroupId) => ({
-							flagId,
-							targetGroupId,
-						}))
+				if (!createdFlag) {
+					throw rpcError.internal(
+						"The feature flag could not be created. Try again in a moment."
 					);
 				}
 
-				await tx.insert(flagChangeEvents).values({
-					id: randomUUIDv7(),
+				await linkTargetGroups(
+					tx,
 					flagId,
-					websiteId: createdFlag.websiteId,
-					organizationId: createdFlag.organizationId,
-					changeType: "created",
-					before: null,
-					after: buildFlagChangeSnapshot(createdFlag),
-					changedBy: createdBy,
-				});
+					input.websiteId,
+					input.targetGroupIds ?? []
+				);
+				await recordFlagChange(tx, "created", null, createdFlag, createdBy);
 
 				return createdFlag;
+			}).catch((error: unknown) => {
+				if (
+					isUniqueViolationFor(error, "flags_key_org_unique") ||
+					isUniqueViolationFor(error, "flags_key_website_unique")
+				) {
+					throw rpcError.conflict(
+						"A feature flag with this key already exists. Pick a different key."
+					);
+				}
+				throw error;
 			});
 
-			await invalidateFlagCache(
-				newFlag.id,
-				input.websiteId,
-				input.organizationId,
-				input.key
-			);
+			await invalidateFlagCache(newFlag.id, input.websiteId, orgId, input.key);
 
 			return newFlag;
 		}),
@@ -830,17 +811,15 @@ export const flagsRouter = {
 					...(input.status && { status: input.status }),
 				});
 			}
-			const existingFlag = await context.db
+			const [flag] = await context.db
 				.select()
 				.from(flags)
 				.where(and(eq(flags.id, input.id), isNull(flags.deletedAt)))
 				.limit(1);
 
-			if (existingFlag.length === 0) {
+			if (!flag) {
 				throw rpcError.notFound("Flag", input.id);
 			}
-
-			const flag = existingFlag[0];
 
 			let workspace: AuthedWorkspaceWithPlan | undefined;
 			if (flag.websiteId) {
@@ -859,8 +838,16 @@ export const flagsRouter = {
 				});
 			} else {
 				throw rpcError.forbidden(
-					"Flags must be scoped to a website or organization"
+					"This feature flag is not linked to a website or organization, so it cannot be changed."
 				);
+			}
+
+			if (
+				(input.type ?? flag.type) === "multivariant" &&
+				(input.variants || input.type) &&
+				hasUnbalancedVariantWeights(input.variants ?? flag.variants ?? [])
+			) {
+				throw rpcError.badRequest(VARIANT_WEIGHTS_ERROR);
 			}
 
 			const isUnarchiving =
@@ -902,8 +889,7 @@ export const flagsRouter = {
 				);
 			}
 
-			const nextDependencies =
-				input.dependencies ?? (flag.dependencies as string[]) ?? [];
+			const nextDependencies = input.dependencies ?? flag.dependencies ?? [];
 
 			const dependencyFlags = nextDependencies.length
 				? await context.db
@@ -923,7 +909,7 @@ export const flagsRouter = {
 
 			if (dependencyFlags.length !== nextDependencies.length) {
 				throw rpcError.badRequest(
-					"One or more dependency flags were not found in this scope"
+					"One or more feature flags this depends on were not found. They may have been deleted. Refresh the page and try again."
 				);
 			}
 
@@ -950,53 +936,18 @@ export const flagsRouter = {
 					.where(and(eq(flags.id, id), notDeleted(flags)))
 					.returning();
 
+				if (!updated) {
+					throw rpcError.notFound("Flag", id);
+				}
+
 				if (targetGroupIds !== undefined) {
-					// Validate that all target groups exist and belong to the same website
-					if (targetGroupIds.length > 0) {
-						const validGroups = await tx.query.targetGroups.findMany({
-							where: {
-								RAW: (t) =>
-									requireCondition(
-										and(
-											inArray(t.id, targetGroupIds),
-											eq(t.websiteId, flag.websiteId || ""),
-											isNull(t.deletedAt)
-										)
-									),
-							},
-						});
-
-						if (validGroups.length !== targetGroupIds.length) {
-							throw rpcError.badRequest(
-								"One or more target groups not found or do not belong to this website"
-							);
-						}
-					}
-
 					await tx
 						.delete(flagsToTargetGroups)
 						.where(eq(flagsToTargetGroups.flagId, id));
-
-					if (targetGroupIds.length > 0) {
-						await tx.insert(flagsToTargetGroups).values(
-							targetGroupIds.map((targetGroupId) => ({
-								flagId: id,
-								targetGroupId,
-							}))
-						);
-					}
+					await linkTargetGroups(tx, id, flag.websiteId, targetGroupIds);
 				}
 
-				await tx.insert(flagChangeEvents).values({
-					id: randomUUIDv7(),
-					flagId: updated.id,
-					websiteId: updated.websiteId,
-					organizationId: updated.organizationId,
-					changeType: "updated",
-					before: buildFlagChangeSnapshot(flag),
-					after: buildFlagChangeSnapshot(updated),
-					changedBy,
-				});
+				await recordFlagChange(tx, "updated", flag, updated, changedBy);
 
 				return updated;
 			});
@@ -1025,17 +976,16 @@ export const flagsRouter = {
 		.input(z.object({ id: z.string() }))
 		.output(successOutputSchema)
 		.handler(async ({ context, input }) => {
-			const existingFlag = await context.db
+			const [flag] = await context.db
 				.select()
 				.from(flags)
 				.where(and(eq(flags.id, input.id), isNull(flags.deletedAt)))
 				.limit(1);
 
-			if (existingFlag.length === 0) {
+			if (!flag) {
 				throw rpcError.notFound("Flag", input.id);
 			}
 
-			const flag = existingFlag[0];
 			let workspace: Workspace | undefined;
 
 			if (flag.websiteId) {
@@ -1052,7 +1002,7 @@ export const flagsRouter = {
 				});
 			} else {
 				throw rpcError.forbidden(
-					"Flags must be scoped to a website or organization"
+					"This feature flag is not linked to a website or organization, so it cannot be changed."
 				);
 			}
 
@@ -1068,16 +1018,11 @@ export const flagsRouter = {
 					.where(and(eq(flags.id, input.id), isNull(flags.deletedAt)))
 					.returning();
 
-				await tx.insert(flagChangeEvents).values({
-					id: randomUUIDv7(),
-					flagId: archivedFlag.id,
-					websiteId: archivedFlag.websiteId,
-					organizationId: archivedFlag.organizationId,
-					changeType: "archived",
-					before: buildFlagChangeSnapshot(flag),
-					after: buildFlagChangeSnapshot(archivedFlag),
-					changedBy,
-				});
+				if (!archivedFlag) {
+					throw rpcError.notFound("Flag", input.id);
+				}
+
+				await recordFlagChange(tx, "archived", flag, archivedFlag, changedBy);
 			});
 
 			await invalidateFlagCache(input.id, flag.websiteId, flag.organizationId);

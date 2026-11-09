@@ -6,11 +6,11 @@ describe("conversation model compatibility", () => {
 	it.each([
 		"openai/gpt-5.6-terra",
 		"openai/gpt-5.6-luna",
+		"openai/gpt-6.1-sol",
 	])("maps %s to OpenAI effort without inheriting Anthropic options", (modelId) => {
 		for (const effort of ["low", "medium", "high"] as const) {
 			const options = conversationModelOptions(modelId, effort);
 			expect(options.providerOptions?.openai).toEqual({
-				strictJsonSchema: false,
 				reasoningEffort: effort,
 			});
 			expect(options.providerOptions?.anthropic).toBeUndefined();
@@ -40,23 +40,18 @@ describe("conversation model compatibility", () => {
 			"openai/synthetic-unknown-model",
 		]) {
 			const options = conversationModelOptions(modelId, "high");
-			expect(options.providerOptions?.openai).toEqual({
-				strictJsonSchema: false,
-				reasoningEffort: "high",
-			});
+			expect(options.providerOptions).toBeUndefined();
 			expect(options.systemProviderOptions).toBeUndefined();
-			expect(options.temperature).toBeUndefined();
+			expect(options.temperature).toBe(0.1);
 		}
 	});
 
 	it("leaves reasoning at provider defaults when effort is absent or off, while retaining valid cache settings", () => {
 		for (const thinking of [undefined, "off"] as const) {
 			const openai = conversationModelOptions(modelNames.balanced, thinking);
-			expect(openai.providerOptions).toEqual({
-				openai: { strictJsonSchema: false },
-			});
+			expect(openai.providerOptions).toBeUndefined();
 			expect(openai.systemProviderOptions).toBeUndefined();
-			expect(openai.temperature).toBe(0.1);
+			expect(openai.temperature).toBeUndefined();
 
 			const claude = conversationModelOptions(
 				"anthropic/claude-sonnet-4.6",

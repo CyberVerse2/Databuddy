@@ -1,7 +1,19 @@
 import { expect, test } from "@/test/e2e/fixtures";
 
+const selfHosted = process.env.SELFHOST?.trim().toLowerCase() === "true";
+const verifyEmail =
+	!selfHosted ||
+	process.env.REQUIRE_EMAIL_VERIFICATION?.trim().toLowerCase() === "true";
+const emailEnabled = !selfHosted || Boolean(process.env.EMAIL_FROM?.trim());
+
+test.beforeEach(async ({ page }) => {
+	await page.route("**/api/auth/get-session**", (route) =>
+		route.fulfill({ json: null })
+	);
+});
+
 test("keeps registration completion specific to the deployment mode", {
-	tag: "@regression",
+	tag: ["@regression", "@selfhost"],
 }, async ({ page }) => {
 	await page.route("**/api/auth/sign-up/email", (route) =>
 		route.fulfill({
@@ -25,12 +37,14 @@ test("keeps registration completion specific to the deployment mode", {
 	await page.getByLabel(/^Confirm password/i).fill("Example-password-123!");
 	await page.getByRole("button", { name: "Create account" }).click();
 
-	const selfHosted = process.env.SELFHOST?.trim().toLowerCase() === "true";
 	await expect(
 		page.getByRole("heading", {
-			name: selfHosted ? "Account created" : "Verify your email",
+			name: verifyEmail ? "Verify your email" : "Account created",
 		})
 	).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "Resend verification email" })
+	).toHaveCount(emailEnabled && verifyEmail ? 1 : 0);
 	const signIn = page.getByRole("link", { name: "Sign in", exact: true });
 	if (selfHosted) {
 		await expect(signIn).toBeVisible();
@@ -39,3 +53,53 @@ test("keeps registration completion specific to the deployment mode", {
 		await expect(page.getByText(/check your spam folder/)).toBeVisible();
 	}
 });
+
+test("shows only configured self-host sign-in methods", {
+	tag: ["@regression", "@selfhost"],
+}, async ({ page }) => {
+	await page.goto("/login");
+	await expect(
+		page.getByRole("button", { name: "Sign in with GitHub" })
+	).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "Sign in with Google" })
+	).toBeVisible();
+	await expect(
+		page.getByRole("link", { name: "Sign in with Magic Link" })
+	).toHaveCount(emailEnabled ? 1 : 0);
+	await expect(
+		page.getByRole("link", { name: "Forgot password?" })
+	).toHaveCount(emailEnabled ? 1 : 0);
+	await expect(
+		page.getByRole("button", { name: "Sign in", exact: true })
+	).toBeVisible();
+	await page.goto("/register");
+	await expect(
+		page.getByRole("button", { name: "Sign up with GitHub" })
+	).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "Sign up with Google" })
+	).toBeVisible();
+});
+
+if (!emailEnabled) {
+	for (const route of [
+		"magic",
+		"magic-sent",
+		"forgot",
+		"verification-needed",
+	]) {
+		test(`explains unavailable email on /login/${route}`, {
+			tag: ["@regression", "@selfhost"],
+		}, async ({ page }) => {
+			await page.goto(`/login/${route}?callback=%2Fwebsites`);
+			await expect(
+				page.getByRole("heading", { name: "Email isn't set up" })
+			).toBeVisible();
+			await expect(page.locator("form")).toHaveCount(0);
+			await expect(
+				page.getByRole("link", { name: "Back to sign in" })
+			).toHaveAttribute("href", "/login?callback=%2Fwebsites");
+		});
+	}
+}

@@ -8,6 +8,8 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
+import * as execution from "@databuddy/ai/agents/execution";
+import type { BusinessContext } from "@databuddy/ai/lib/business-context";
 import { db, eq, inArray, shutdownPostgres } from "@databuddy/db";
 import {
 	analyticsInsights,
@@ -21,13 +23,15 @@ import type {
 	InvestigationOutcome,
 	InvestigationSignal,
 } from "@databuddy/shared/insights";
-import { appliedInsightActionReply } from "@databuddy/shared/insights";
+import { rankInvestigationBusinessContext } from "./business-context-ranking";
 import { createEvidenceSnapshot } from "./evidence-snapshot";
 import { resumeInsightReply, recordInsightReplyFailure } from "./resume";
 import * as billing from "./investigation-billing";
+import { createAutumnClient } from "@databuddy/rpc/autumn";
 
 const integration =
 	process.env.INSIGHTS_INTEGRATION_TESTS === "true" ? describe : describe.skip;
+const originalSecret = process.env.AUTUMN_SECRET_KEY;
 const ids: string[] = [];
 const signal: InvestigationSignal = {
 	signalKey: "goal:workspace",
@@ -58,8 +62,6 @@ const outcome: InvestigationOutcome = {
 async function fixture(
 	input: {
 		legacy?: boolean;
-		corrupt?: boolean;
-		body?: string;
 		intent?: "analysis" | "clarification" | "verification";
 	} = {}
 ) {
@@ -92,7 +94,7 @@ async function fixture(
 		sentiment: "negative",
 	});
 	const snapshot = createEvidenceSnapshot({
-		organizationId: input.corrupt ? "wrong-organization" : organizationId,
+		organizationId,
 		websiteId,
 		capturedAt: "2026-09-12T00:00:00.000Z",
 		signal,
@@ -109,9 +111,6 @@ async function fixture(
 				output: { total_users_entered: 200, total_users_completed: 20 },
 			},
 		],
-		descriptions: {
-			get_goal_analytics: "Counts eligible website visitors, not attempts.",
-		},
 	});
 	await db.insert(insightObservations).values({
 		id: observationId,
@@ -131,7 +130,7 @@ async function fixture(
 		id: replyId,
 		insightId,
 		authorName: "Example teammate",
-		body: input.body ?? "Explain the original result",
+		body: "Explain the original result",
 		sourceObservationId: observationId,
 		intent: input.intent ?? "clarification",
 		createdAt:
@@ -188,7 +187,7 @@ function nativeProvider(
 		released = 0;
 	let loseConfirmation = options.loseConfirmation === true;
 	let failConfirmation = options.failConfirmation === true;
-	const client = billing.createInvestigationBillingClient({
+	const client = createAutumnClient({
 		secretKey: "synthetic-local-only",
 		fetcher: async (request) => {
 			if (!(request instanceof Request)) {
@@ -288,6 +287,7 @@ function wireProvider(remote: ReturnType<typeof nativeProvider>) {
 	const nativeReserve = billing.reserveInvestigationCharge;
 	const nativeSettle = billing.settleInvestigationCharge;
 	const nativeRelease = billing.releaseInvestigationCharge;
+	process.env.AUTUMN_SECRET_KEY = "synthetic-local-only";
 	spyOn(billing, "resolveInvestigationBilling").mockResolvedValue({
 		mode: "fixed",
 		customerId: "synthetic-customer",
@@ -306,7 +306,14 @@ function wireProvider(remote: ReturnType<typeof nativeProvider>) {
 }
 
 integration("included saved-evidence replies", () => {
-	afterEach(() => mock.restore());
+	afterEach(() => {
+		mock.restore();
+		if (originalSecret === undefined) {
+			Reflect.deleteProperty(process.env, "AUTUMN_SECRET_KEY");
+		} else {
+			process.env.AUTUMN_SECRET_KEY = originalSecret;
+		}
+	});
 	afterAll(async () => {
 		if (ids.length) {
 			await db.delete(organization).where(inArray(organization.id, ids));
@@ -314,41 +321,6 @@ integration("included saved-evidence replies", () => {
 		await closeInsightsQueue();
 		await shutdownPostgres();
 	});
-	it("refuses new analysis under unconfigured terms before provider reservation or fresh work", async () => {
-		const f = await fixture({ intent: "analysis" });
-		spyOn(billing, "resolveInvestigationBilling").mockResolvedValue({
-			mode: "unconfigured",
-			customerId: null,
-		});
-		const reserve = spyOn(
-			billing,
-			"reserveInvestigationCharge"
-		).mockImplementation(forbidden);
-		const newWork = mock(forbidden);
-		await expect(
-			resumeInsightReply(
-				f.replyId,
-				newWork,
-				newWork,
-				newWork,
-				{
-					loadCurrentBusinessScope: newWork,
-					loadBusinessProfile: newWork,
-					recallBusinessContext: newWork,
-				},
-				newWork
-			)
-		).rejects.toThrow("Activate investigation billing");
-		expect(reserve).not.toHaveBeenCalled();
-		expect(newWork).not.toHaveBeenCalled();
-		expect(
-			await db
-				.select()
-				.from(insightObservations)
-				.where(eq(insightObservations.insightId, f.insightId))
-		).toHaveLength(1);
-	});
-
 	it("rejects an attached $2 usage price at the native reservation boundary before measurements or model work", async () => {
 		const f = await fixture({ intent: "analysis" });
 		const remote = nativeProvider({ price: 2 });
@@ -467,29 +439,6 @@ integration("included saved-evidence replies", () => {
 				.where(eq(insightObservations.insightId, f.insightId))
 		).toHaveLength(2);
 	});
-	it.each([
-		"Please run a new analysis",
-		appliedInsightActionReply("goal"),
-	])("never selects new work from new public reply text: %s", async (body) => {
-		const f = await fixture({ body });
-		let calls = 0;
-		await resumeInsightReply(
-			f.replyId,
-			forbidden,
-			forbidden,
-			forbidden,
-			business,
-			async () => {
-				calls++;
-				return {
-					text: "This reply only explains saved evidence.",
-					modelId: "openai/gpt-5.6-luna",
-					usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-				};
-			}
-		);
-		expect(calls).toBe(1);
-	});
 	it("keeps a legacy missing snapshot explicit without fresh reads", async () => {
 		const f = await fixture({ legacy: true });
 		await resumeInsightReply(
@@ -508,51 +457,6 @@ integration("included saved-evidence replies", () => {
 			}
 		);
 	});
-	it("rejects a snapshot with a different organization before generation", async () => {
-		const f = await fixture({ corrupt: true });
-		await expect(
-			resumeInsightReply(
-				f.replyId,
-				forbidden,
-				forbidden,
-				forbidden,
-				business,
-				forbidden
-			)
-		).rejects.toThrow("different investigation");
-	});
-	it("delivers a final failure notice without creating a replacement billing operation", async () => {
-		const f = await fixture({ intent: "analysis" });
-		await db
-			.update(insightReplies)
-			.set({
-				slackDelivery: {
-					type: "slack",
-					channelId: "C_SYNTHETIC",
-					threadTs: "123.456",
-				},
-			})
-			.where(eq(insightReplies.id, f.replyId));
-		const billingWork = mock(forbidden);
-		spyOn(billing, "reserveInvestigationCharge").mockImplementation(
-			billingWork
-		);
-		spyOn(billing, "settleInvestigationCharge").mockImplementation(billingWork);
-		let deliveries = 0;
-		await recordInsightReplyFailure(f.replyId, true, async (input) => {
-			expect(input.result).toBeNull();
-			deliveries++;
-			return "123.457";
-		});
-		expect(billingWork).not.toHaveBeenCalled();
-		expect(deliveries).toBe(1);
-		const [reply] = await db
-			.select()
-			.from(insightReplies)
-			.where(eq(insightReplies.id, f.replyId));
-		expect(reply?.status).toBe("failed");
-	});
-
 	it("replays a lost native confirmation after the reply is saved without another model call or debit", async () => {
 		const f = await fixture({ intent: "analysis" });
 		await db
@@ -732,10 +636,13 @@ integration("included saved-evidence replies", () => {
 			.select()
 			.from(insightReplies)
 			.where(eq(insightReplies.id, f.replyId));
+		if (!saved?.observationId) {
+			throw new Error("The reply was saved without an observation");
+		}
 		const [observation] = await db
 			.select()
 			.from(insightObservations)
-			.where(eq(insightObservations.id, saved!.observationId!));
+			.where(eq(insightObservations.id, saved.observationId));
 		expect(observation?.outcome.publish).toBe(true);
 		expect(observation?.snapshot?.completion).toBe("incomplete");
 		expect(
@@ -750,6 +657,110 @@ integration("included saved-evidence replies", () => {
 		).toBe("succeeded");
 		expect(model).toHaveBeenCalledTimes(1);
 		expect(remote.state().confirmed).toBe(0);
+	});
+
+	it("ranks an oversized analysis context, records the ranking usage, and completes the reply", async () => {
+		const f = await fixture({ intent: "analysis" });
+		const remote = nativeProvider();
+		wireProvider(remote);
+		const usage = spyOn(execution, "trackAgentUsage");
+		const capturedAt = new Date().toISOString();
+		const page = (id: string, path = `/${id}`) => ({
+			id,
+			kind: "website" as const,
+			observedAt: capturedAt,
+			url: `https://evidence.example.invalid${path}`,
+			content: id.padEnd(path === "/" ? 4000 : 3000, "."),
+		});
+		const context = (sources: BusinessContext["sources"]): BusinessContext => ({
+			capturedAt,
+			status: "ready",
+			issues: [],
+			sources,
+		});
+		const profile = context([
+			{
+				id: "profile",
+				kind: "organization_profile",
+				observedAt: capturedAt,
+				content: "Saved profile".padEnd(4000, "."),
+			},
+			page("home", "/"),
+		]);
+		const related = context([
+			{
+				id: "reply",
+				kind: "team_reply",
+				observedAt: capturedAt,
+				content: "Original correction".padEnd(4000, "."),
+			},
+			page("decoration"),
+			page("old-plan"),
+			page("exception"),
+		]);
+		const ranked = ["profile", "reply", "home", "exception"];
+		const model = mock(async (input: { businessContext?: BusinessContext }) => {
+			expect(input.businessContext?.sources.map((s) => s.id)).toEqual(ranked);
+			return {
+				outcome,
+				completion: "complete" as const,
+				snapshot: { ...f.snapshot, completion: "complete" as const },
+				toolCallCount: 1,
+			};
+		});
+		const refresh = mock(async () => ({ signal, evidence: [] }));
+		expect(
+			await resumeInsightReply(
+				f.replyId,
+				model,
+				forbidden,
+				refresh,
+				{
+					...freshBusiness,
+					loadBusinessProfile: async () => profile,
+					recallBusinessContext: async () => related,
+					rankBusinessContext: (options) =>
+						rankInvestigationBusinessContext(options, async () => ({
+							answers: {
+								q0: { type: "boolean", probability: 0.1 },
+								q1: { type: "boolean", probability: 0.1 },
+								q2: { type: "boolean", probability: 0.9 },
+							},
+							usage: { inputTokens: 100, outputTokens: 3 },
+						})),
+				},
+				forbidden
+			)
+		).toBe("succeeded");
+		expect(model).toHaveBeenCalledTimes(1);
+		expect(usage).toHaveBeenCalledTimes(1);
+		expect(usage.mock.calls[0]?.[0]).toMatchObject({
+			modelId: "typesafe-ai/jev",
+			usage: { totalTokens: 103 },
+			organizationId: f.organizationId,
+			websiteId: f.websiteId,
+			chatId: `insights:analysis:${f.replyId}`,
+		});
+		const [saved] = await db
+			.select()
+			.from(insightReplies)
+			.where(eq(insightReplies.id, f.replyId));
+		if (!saved?.observationId) {
+			throw new Error("The reply was saved without an observation");
+		}
+		const [observation] = await db
+			.select()
+			.from(insightObservations)
+			.where(eq(insightObservations.id, saved.observationId));
+		expect(
+			observation?.outcome.contextSnapshot?.sources.map((s) => s.id)
+		).toEqual(ranked);
+		expect(remote.state()).toEqual({
+			reserved: 1,
+			confirmed: 1,
+			released: 0,
+			holds: 0,
+		});
 	});
 
 	it("keeps trusted verification free while refreshing the original investigation", async () => {

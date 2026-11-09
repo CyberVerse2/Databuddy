@@ -10,17 +10,20 @@
     "./feedback": "./src/feedback.ts",
     "./github-app": "./src/github-app.ts",
     "./identity": "./src/identity.ts",
+    "./import": "./src/import/pipeline.ts",
     "./websites": "./src/websites.ts",
     "./storage": "./src/storage.ts",
     "./organization-business-context": "./src/organization-business-context.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",
-    "test": "bun test src"
+    "test": "bun test src",
+    "test:integration": "BUSINESS_CONTEXT_INTEGRATION_TESTS=true bun test src/organization-business-context.integration.test.ts src/business-memory.integration.test.ts src/measurement-plan.integration.test.ts"
   },
   "dependencies": {
     "@databuddy/db": "workspace:*",
     "@databuddy/encryption": "workspace:*",
+    "@databuddy/env": "workspace:*",
     "@databuddy/redis": "workspace:*",
     "@databuddy/shared": "workspace:*",
     "supermemory": "^4.17.0",

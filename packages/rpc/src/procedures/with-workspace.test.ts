@@ -1,4 +1,5 @@
 import {
+	afterAll,
 	beforeAll,
 	beforeEach,
 	describe,
@@ -15,6 +16,20 @@ import type {
 
 process.env.REDIS_URL ??= "redis://localhost:6379";
 
+const originalAutumnKey = process.env.AUTUMN_SECRET_KEY;
+
+beforeAll(() => {
+	process.env.AUTUMN_SECRET_KEY = "synthetic-plan-gating";
+});
+
+afterAll(() => {
+	if (originalAutumnKey === undefined) {
+		Reflect.deleteProperty(process.env, "AUTUMN_SECRET_KEY");
+	} else {
+		process.env.AUTUMN_SECRET_KEY = originalAutumnKey;
+	}
+});
+
 const ORGANIZATION_ID = "org-test";
 const OTHER_ORGANIZATION_ID = "org-other";
 const USER_ID = "user-test";
@@ -22,6 +37,7 @@ const WEBSITE_ID = "site-test";
 const OTHER_WEBSITE_ID = "site-other";
 
 interface WebsiteRow {
+	deletedAt?: Date | null;
 	id: string;
 	isPublic: boolean;
 	organizationId: string;
@@ -176,7 +192,7 @@ describe("withWorkspace organization member grants", () => {
 				resource: "link",
 			}),
 			"FORBIDDEN",
-			/Missing required link permissions/
+			/role can't .* links in this organization/
 		);
 	});
 
@@ -202,7 +218,7 @@ describe("withWorkspace organization member grants", () => {
 				resource: "link",
 			}),
 			"FORBIDDEN",
-			/does not belong to the active organization/
+			/belongs to a different organization/
 		);
 		expect(mockGetMemberRole).not.toHaveBeenCalledWith(
 			USER_ID,
@@ -234,7 +250,151 @@ describe("withWorkspace organization member grants", () => {
 				resource: "link",
 			}),
 			"BAD_REQUEST",
-			/Workspace is required/
+			/Select an organization and try again/
+		);
+	});
+});
+
+describe("withWorkspace OAuth connection grants", () => {
+	function oauthContext(
+		websiteIds: string[] | null = [WEBSITE_ID],
+		scopes = ["read:data", "manage:websites", "read:links", "write:links"]
+	): Context {
+		const context = userContext();
+		return {
+			...context,
+			oauth: {
+				grant: { organizationId: ORGANIZATION_ID, websiteIds },
+				scopes,
+				user: context.user!,
+			},
+		};
+	}
+
+	beforeEach(() => {
+		memberRoles.set(`${USER_ID}:${ORGANIZATION_ID}`, "owner");
+		memberRoles.set(`${USER_ID}:${OTHER_ORGANIZATION_ID}`, "owner");
+		for (const id of [WEBSITE_ID, OTHER_WEBSITE_ID]) {
+			websites.set(id, {
+				id,
+				isPublic: true,
+				organizationId: ORGANIZATION_ID,
+			});
+		}
+	});
+
+	it("carries the approved grant and scopes into RPC context", async () => {
+		const oauth = oauthContext().oauth!;
+		const context = await createRPCContext(
+			{ headers: new Headers() },
+			{ apiKey: null, oauth, session: null }
+		);
+		expect(context.oauth).toBe(oauth);
+		expect(context.organizationId).toBe(ORGANIZATION_ID);
+	});
+
+	it("grants a selected website and separately approved organization links", async () => {
+		const context = oauthContext();
+		expect(
+			(
+				await withWorkspace(context, {
+					permissions: ["read"],
+					websiteId: WEBSITE_ID,
+				})
+			).website.id
+		).toBe(WEBSITE_ID);
+		expect(
+			(await requireLinkAccess(context, ORGANIZATION_ID, "create"))
+				.organizationId
+		).toBe(ORGANIZATION_ID);
+	});
+
+	it("denies an unselected public website without falling back to demo access", async () => {
+		await expectRpcError(
+			withPublicWorkspace(oauthContext(), {
+				permissions: ["read"],
+				websiteId: OTHER_WEBSITE_ID,
+			}),
+			"FORBIDDEN",
+			/websites selected when it was connected/
+		);
+	});
+
+	it("rejects a deleted selected website before member or public access", async () => {
+		websites.set(WEBSITE_ID, {
+			deletedAt: new Date("2026-01-01"),
+			id: WEBSITE_ID,
+			isPublic: true,
+			organizationId: ORGANIZATION_ID,
+		});
+		await expectRpcError(
+			withPublicWorkspace(oauthContext(), {
+				permissions: ["read"],
+				websiteId: WEBSITE_ID,
+			}),
+			"NOT_FOUND"
+		);
+		expect(mockGetMemberRole).not.toHaveBeenCalled();
+	});
+
+	it("keeps the organization boundary even for cross-organization procedures", async () => {
+		await expectRpcError(
+			withWorkspace(oauthContext(null), {
+				allowCrossOrg: true,
+				organizationId: OTHER_ORGANIZATION_ID,
+				permissions: ["read"],
+				resource: "organization",
+			}),
+			"FORBIDDEN",
+			/access to this organization/
+		);
+	});
+
+	it.each([
+		"organization",
+		"flag",
+		"website",
+	] as const)("denies organization-wide %s access from a selected-site grant", async (resource) => {
+		await expectRpcError(
+			withWorkspace(oauthContext(), {
+				organizationId: ORGANIZATION_ID,
+				permissions: ["read"],
+				resource,
+			}),
+			"FORBIDDEN",
+			/websites selected when it was connected/
+		);
+	});
+
+	it("requires approved capability scopes even when the current role can write", async () => {
+		await expectRpcError(
+			withWorkspace(oauthContext([WEBSITE_ID], ["read:data"]), {
+				permissions: ["update"],
+				websiteId: WEBSITE_ID,
+			}),
+			"FORBIDDEN",
+			/missing the manage:websites scope/
+		);
+	});
+
+	it("still applies the member's current role after consent", async () => {
+		memberRoles.set(`${USER_ID}:${ORGANIZATION_ID}`, "viewer");
+		await expectRpcError(
+			withWorkspace(oauthContext(), {
+				permissions: ["update"],
+				websiteId: WEBSITE_ID,
+			}),
+			"FORBIDDEN",
+			/viewer role can't edit websites/
+		);
+		memberRoles.delete(`${USER_ID}:${ORGANIZATION_ID}`);
+		await expectRpcError(
+			withPublicWorkspace(oauthContext(), {
+				permissions: ["read"],
+				websiteId: WEBSITE_ID,
+			}),
+			"FORBIDDEN",
+			/not a member/
 		);
 	});
 });
@@ -248,7 +408,7 @@ describe("withWorkspace api key grants", () => {
 				resource: "link",
 			}),
 			"FORBIDDEN",
-			/API key does not have access to this workspace/
+			/This API key does not have access to this organization/
 		);
 	});
 
@@ -260,7 +420,7 @@ describe("withWorkspace api key grants", () => {
 				resource: "link",
 			}),
 			"FORBIDDEN",
-			/API key missing required scope: write:links/
+			/This API key is missing the write:links scope/
 		);
 	});
 
@@ -297,7 +457,7 @@ describe("withWorkspace api key grants", () => {
 				websiteId: OTHER_WEBSITE_ID,
 			}),
 			"FORBIDDEN",
-			/API key missing required scope: read:data/
+			/This API key is missing the read:data scope/
 		);
 	});
 
@@ -347,7 +507,7 @@ describe("withWorkspace website resolution", () => {
 				websiteId: WEBSITE_ID,
 			}),
 			"FORBIDDEN",
-			/Website does not belong to this organization/
+			/This website belongs to a different organization/
 		);
 	});
 
@@ -473,8 +633,9 @@ describe("withWorkspace plan resolution", () => {
 	});
 });
 
-it("self-hosting skips billing without relaxing workspace permissions", async () => {
+it("self-hosting and keyless development skip billing without relaxing workspace permissions", async () => {
 	const original = process.env.SELFHOST;
+	const originalNodeEnv = process.env.NODE_ENV;
 	process.env.SELFHOST = "true";
 	try {
 		const context = await createRPCContext(
@@ -531,7 +692,22 @@ it("self-hosting skips billing without relaxing workspace permissions", async ()
 			requireFeatureWithLimit("free", "error_tracking", 0)
 		).toThrow();
 		expect(() => requireUsageWithinLimit("free", "goals", 10_000)).toThrow();
+
+		Reflect.deleteProperty(process.env, "AUTUMN_SECRET_KEY");
+		expect(() =>
+			requireFeatureWithLimit("free", "error_tracking", 0)
+		).not.toThrow();
+		expect(() =>
+			requireUsageWithinLimit("free", "goals", 10_000)
+		).not.toThrow();
+
+		process.env.NODE_ENV = "production";
+		expect(() =>
+			requireFeatureWithLimit("free", "error_tracking", 0)
+		).toThrow();
 	} finally {
+		process.env.AUTUMN_SECRET_KEY = "synthetic-plan-gating";
+		process.env.NODE_ENV = originalNodeEnv;
 		if (original === undefined) {
 			Reflect.deleteProperty(process.env, "SELFHOST");
 		} else {

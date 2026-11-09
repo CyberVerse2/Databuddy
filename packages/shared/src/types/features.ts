@@ -9,6 +9,18 @@ export const PLAN_IDS = {
 
 export type PlanId = (typeof PLAN_IDS)[keyof typeof PLAN_IDS];
 
+export function isRenewingSubscription(subscription: {
+	autoEnable: boolean;
+	canceledAt: number | null;
+	planId: string;
+}): boolean {
+	return (
+		subscription.planId !== PLAN_IDS.FREE &&
+		!subscription.autoEnable &&
+		subscription.canceledAt === null
+	);
+}
+
 export const INTELLIGENCE_PLAN_IDS = {
 	ANALYST: "intelligence",
 	DATA_TEAM: "intelligence_scale",
@@ -16,11 +28,6 @@ export const INTELLIGENCE_PLAN_IDS = {
 
 export type IntelligencePlanId =
 	(typeof INTELLIGENCE_PLAN_IDS)[keyof typeof INTELLIGENCE_PLAN_IDS];
-
-export const INTELLIGENCE_CONTACT_TOPICS = {
-	[INTELLIGENCE_PLAN_IDS.ANALYST]: "intelligence-business",
-	[INTELLIGENCE_PLAN_IDS.DATA_TEAM]: "intelligence-scale",
-} as const satisfies Record<IntelligencePlanId, string>;
 
 const PLAN_CAPABILITY_ALIASES: Record<IntelligencePlanId, PlanId> = {
 	[INTELLIGENCE_PLAN_IDS.ANALYST]: PLAN_IDS.SCALE,
@@ -194,10 +201,10 @@ export const FEATURE_METADATA: Record<FeatureId | GatedFeatureId, FeatureMeta> =
 		[GATED_FEATURES.USERS]: {
 			name: "Users",
 			description: "Track individual user behavior and sessions",
-			upgradeMessage: "Users is available on all plans",
+			upgradeMessage: "Available on all plans",
 		},
 		[GATED_FEATURES.FEATURE_FLAGS]: {
-			name: "Feature Flags",
+			name: "Feature flags",
 			description: "Control feature rollouts with targeting rules",
 			upgradeMessage: "Upgrade for more feature flags",
 			unit: "flags",
@@ -205,10 +212,10 @@ export const FEATURE_METADATA: Record<FeatureId | GatedFeatureId, FeatureMeta> =
 		[GATED_FEATURES.WEB_VITALS]: {
 			name: "Web Vitals",
 			description: "Monitor Core Web Vitals and performance",
-			upgradeMessage: "Web Vitals is available on all plans",
+			upgradeMessage: "Available on all plans",
 		},
 		[GATED_FEATURES.ERROR_TRACKING]: {
-			name: "Error Tracking",
+			name: "Error tracking",
 			description: "Capture and analyze JavaScript errors",
 			upgradeMessage: "Upgrade to Hobby for error tracking",
 			minPlan: PLAN_IDS.HOBBY,
@@ -216,7 +223,7 @@ export const FEATURE_METADATA: Record<FeatureId | GatedFeatureId, FeatureMeta> =
 		[GATED_FEATURES.GEOGRAPHIC]: {
 			name: "Geographic",
 			description: "View visitor locations on a map",
-			upgradeMessage: "Geographic is available on all plans",
+			upgradeMessage: "Available on all plans",
 		},
 	};
 
@@ -238,13 +245,19 @@ export function getPlanDisplayName(planId: PlanId | string | null): string {
 	);
 }
 
+export function getUpgradePlanDisplayName(planId: PlanId): string {
+	return getPlanDisplayName(
+		planId === PLAN_IDS.SCALE ? INTELLIGENCE_PLAN_IDS.ANALYST : planId
+	);
+}
+
 export function getFeatureUnavailableMessage(
 	feature: GatedFeatureId,
 	nextPlan: PlanId | null
 ): string {
 	const featureName = FEATURE_METADATA[feature]?.name ?? "This feature";
 	return nextPlan
-		? `${featureName} is not available on your plan. Upgrade to ${getPlanDisplayName(nextPlan)} to unlock it.`
+		? `${featureName} is not available on your plan. Upgrade to ${getUpgradePlanDisplayName(nextPlan)} to unlock it.`
 		: `${featureName} is not available on your plan.`;
 }
 
@@ -260,7 +273,7 @@ export function getPlanLimitMessage(
 	const noun = limit === 1 ? unit.replace(TRAILING_PLURAL_S, "") : unit;
 	const included = `Your ${getPlanDisplayName(planId)} plan includes ${limit} ${noun}.`;
 	return nextPlan
-		? `${included} Delete one or upgrade to ${getPlanDisplayName(nextPlan)} to create more.`
+		? `${included} Delete one or upgrade to ${getUpgradePlanDisplayName(nextPlan)} to create more.`
 		: included;
 }
 

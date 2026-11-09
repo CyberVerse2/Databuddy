@@ -122,7 +122,7 @@ export function CancelSubscriptionDialog({
 				{step === "feedback" ? (
 					<>
 						<Dialog.Header>
-							<Dialog.Title>Before you go...</Dialog.Title>
+							<Dialog.Title>Before you go…</Dialog.Title>
 							<Dialog.Description>
 								We'd love to know why you're canceling so we can improve
 							</Dialog.Description>
@@ -161,7 +161,7 @@ export function CancelSubscriptionDialog({
 								<Textarea
 									className="mt-2 resize-none"
 									onChange={(event) => setFeedbackDetails(event.target.value)}
-									placeholder="Tell us more (optional)..."
+									placeholder="Tell us more (optional)…"
 									rows={3}
 									value={feedbackDetails}
 								/>
@@ -174,7 +174,7 @@ export function CancelSubscriptionDialog({
 								onClick={resetAndClose}
 								variant="secondary"
 							>
-								Keep subscription
+								Keep plan
 							</Button>
 							<Button
 								className="w-full sm:w-auto"
@@ -257,9 +257,9 @@ export function CancelSubscriptionDialog({
 							</Button>
 
 							{selected === "immediate" && (
-								<div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/5 p-3">
+								<div className="flex items-start gap-2 rounded-md border bg-card p-3">
 									<WarningCircleIcon className="mt-0.5 size-4 shrink-0 text-destructive" />
-									<span className="text-destructive text-xs">
+									<span className="text-muted-foreground text-xs">
 										This action cannot be undone. You will lose access to all{" "}
 										{planName} features immediately.
 									</span>

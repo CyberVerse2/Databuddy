@@ -43,7 +43,8 @@ export async function retireObsoleteRetentionObservation(params: {
 	const { observation } = params;
 	const signalKey = observation.signal.signalKey;
 	const insightId = observation.insightId;
-	if (!(signalKey.startsWith("retention:") && observation.id && insightId)) {
+	const observationId = observation.id;
+	if (!(signalKey.startsWith("retention:") && observationId && insightId)) {
 		return false;
 	}
 	const retired = await db.transaction(async (tx) => {
@@ -113,7 +114,7 @@ export async function retireObsoleteRetentionObservation(params: {
 			)
 			.limit(1);
 		if (
-			latest?.id !== observation.id ||
+			latest?.id !== observationId ||
 			latest.insightId !== current.id ||
 			latest.asOf > params.asOf ||
 			latest.createdAt > params.asOf ||
@@ -158,19 +159,31 @@ export async function retireObsoleteRetentionObservation(params: {
 		return true;
 	});
 	if (retired) {
-		try {
-			await Promise.all([
-				invalidateInsightsCachesForOrganization(params.organizationId),
-				invalidateAgentContextSnapshotsForWebsite(params.websiteId),
-			]);
-		} catch (error) {
-			captureInsightsError(error, "generation.cache_invalidation.failed", {
-				organization_id: params.organizationId,
-				website_id: params.websiteId,
-			});
-		}
+		await invalidateInsightCaches(
+			params.organizationId,
+			params.websiteId,
+			"generation.cache_invalidation.failed"
+		);
 	}
 	return retired;
+}
+
+export async function invalidateInsightCaches(
+	organizationId: string,
+	websiteId: string,
+	eventName: string
+): Promise<void> {
+	try {
+		await Promise.all([
+			invalidateInsightsCachesForOrganization(organizationId),
+			invalidateAgentContextSnapshotsForWebsite(websiteId),
+		]);
+	} catch (error) {
+		captureInsightsError(error, eventName, {
+			organization_id: organizationId,
+			website_id: websiteId,
+		});
+	}
 }
 
 export interface WebsiteInvestigation {
@@ -233,7 +246,8 @@ async function fetchPriorInsight(
 export function caseValues(
 	investigation: Pick<WebsiteInvestigation, "outcome" | "signal">,
 	timezone: string,
-	at: Date
+	at: Date,
+	recovered = false
 ) {
 	const { outcome, signal } = investigation;
 	return {
@@ -243,7 +257,7 @@ export function caseValues(
 		resolvedAt: outcome.next.type === "resolve" ? at : null,
 		resolvedReason:
 			outcome.next.type === "resolve" &&
-			(!outcome.verification || outcome.verification.status === "passed")
+			(recovered || outcome.verification?.status === "passed")
 				? ("recovered" as const)
 				: null,
 		status:
@@ -267,6 +281,7 @@ export async function persistInvestigation(params: {
 	notNewerThan: Date;
 	organizationId: string;
 	recheckAt: Date;
+	recovered?: boolean;
 	runId: string;
 	timezone: string;
 }): Promise<WebsiteInvestigation | null> {
@@ -290,7 +305,16 @@ export async function persistInvestigation(params: {
 		params.completion === "complete" &&
 		params.snapshot?.completion === "complete";
 	const shouldPersistCase = interrupting || quietContinuation || complete;
-	const projection = caseValues(investigation, params.timezone, persistedAt);
+	const recoveredResolution =
+		params.recovered === true &&
+		quietContinuation &&
+		investigation.outcome.next.type === "resolve";
+	const projection = caseValues(
+		investigation,
+		params.timezone,
+		persistedAt,
+		recoveredResolution
+	);
 	const row = {
 		...projection,
 		id: investigation.id,
@@ -372,17 +396,11 @@ export async function persistInvestigation(params: {
 		return rows[0] ?? null;
 	});
 
-	try {
-		await Promise.all([
-			invalidateInsightsCachesForOrganization(params.organizationId),
-			invalidateAgentContextSnapshotsForWebsite(investigation.websiteId),
-		]);
-	} catch (error) {
-		captureInsightsError(error, "generation.cache_invalidation.failed", {
-			organization_id: params.organizationId,
-			website_id: investigation.websiteId,
-		});
-	}
+	await invalidateInsightCaches(
+		params.organizationId,
+		investigation.websiteId,
+		"generation.cache_invalidation.failed"
+	);
 
 	emitInsightsEvent("info", "generation.persistence.completed", {
 		organization_id: params.organizationId,
@@ -392,7 +410,7 @@ export async function persistInvestigation(params: {
 		visible: interrupting,
 	});
 
-	return interrupting && persisted
+	return (interrupting || recoveredResolution) && persisted
 		? { ...investigation, id: persisted.id }
 		: null;
 }

@@ -14,10 +14,28 @@ describe("getUserFacingErrorMessage", () => {
 		).toBe("Too many requests. Wait a moment and try again.");
 	});
 
+	it("maps native OAuth provider errors to safe status copy", () => {
+		const error = Object.assign(new Error("Provider not found"), {
+			code: "PROVIDER_NOT_FOUND",
+			status: 404,
+		});
+		expect(getUserFacingErrorMessage(error)).toBe(
+			"That item could not be found. It may have been removed."
+		);
+	});
+
 	it("uses a safe fallback for unknown internal errors", () => {
 		expect(
 			getUserFacingErrorMessage(new Error("postgres relation users failed"))
 		).toBe(DEFAULT_USER_ERROR_MESSAGE);
+	});
+
+	it("explains browser network failures as a connection problem", () => {
+		for (const message of ["Failed to fetch", "Load failed"]) {
+			expect(getUserFacingErrorMessage(new TypeError(message))).toBe(
+				"We could not reach Databuddy. Check your connection and try again."
+			);
+		}
 	});
 
 	it("shows the server-authored message for plan limit errors", () => {
