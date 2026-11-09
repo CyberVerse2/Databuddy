@@ -24,6 +24,9 @@ function claudeModel(thinkingOff = false): LanguageModelV3 {
 				temperature: undefined,
 				topP: undefined,
 				topK: undefined,
+				tools: params.tools?.map((tool) =>
+					tool.type === "function" ? { ...tool, strict: undefined } : tool
+				),
 				providerOptions: thinkingOff
 					? {
 							...params.providerOptions,
