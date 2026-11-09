@@ -1,43 +1,6 @@
-FROM oven/bun:1.4.1-slim AS pruner
+FROM ghcr.io/databuddy-analytics/databuddy-api:sha-83b2662
 
 WORKDIR /app
-
-COPY . .
-
-RUN bunx turbo@2.11.1 prune @databuddy/api --docker
-
-FROM oven/bun:1.4.1-slim AS builder
-
-WORKDIR /app
-
-COPY --from=pruner /app/out/json/ .
-RUN bun install --ignore-scripts
-
-COPY --from=pruner /app/out/full/ .
-COPY turbo.json turbo.json
-COPY tsconfig tsconfig
-
-ENV NODE_ENV=production
-
-RUN bunx turbo run build --filter=@databuddy/api...
-
-WORKDIR /app/apps/api
-
-RUN bun build \
-	--compile \
-	--production \
-	--minify \
-	--sourcemap \
-	--bytecode \
-	--define 'process.env.NODE_ENV="production"' \
-	--outfile /app/server \
-	./src/index.ts
-
-FROM oven/bun:1.4.1-distroless
-
-WORKDIR /app
-
-COPY --from=builder /app/server server
 
 ENV NODE_ENV=production
 
