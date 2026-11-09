@@ -185,6 +185,7 @@ mock.module("../config/models", () => ({
 	modelNames: { balanced: "synthetic/model" },
 	AI_MODEL_MAX_RETRIES: 3,
 	ANTHROPIC_CACHE_1H: {},
+	isAnthropicConfigured: false,
 }));
 
 const { askDatabuddyAgent, streamDatabuddyAgent, traceDatabuddyAgent } =

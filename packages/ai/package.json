@@ -49,6 +49,7 @@
     "test:integration": "BUSINESS_CONTEXT_INTEGRATION_TESTS=true MCP_OAUTH_INTEGRATION_TESTS=true REQUIRE_EMAIL_VERIFICATION=false CLICKHOUSE_INTEGRATION_TESTS=true STRIPE_REVENUE_E2E=true bun test --isolate --only-failures src/lib/business-context.test.ts src/ai/mcp/oauth-website-access.integration.test.ts src/query/builders/stripe-revenue.e2e.integration.test.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.140",
     "@ai-sdk/provider": "^3.0.5",
     "@databuddy/api-keys": "workspace:*",
     "@databuddy/auth": "workspace:*",

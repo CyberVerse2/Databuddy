@@ -1,6 +1,6 @@
 import type { SystemModelMessage } from "ai";
 import type { AgentConfig, AgentThinking } from "../agents/types";
-import { ANTHROPIC_CACHE_1H } from "./models";
+import { ANTHROPIC_CACHE_1H, isAnthropicConfigured } from "./models";
 
 const OPENAI_REASONING_MODEL_IDS = new Set([
 	"openai/gpt-5.6-luna",
@@ -15,6 +15,12 @@ export function conversationModelOptions(
 	systemProviderOptions?: SystemModelMessage["providerOptions"];
 } {
 	const effort = thinking && thinking !== "off" ? thinking : undefined;
+	if (isAnthropicConfigured) {
+		return {
+			systemProviderOptions: ANTHROPIC_CACHE_1H,
+			providerOptions: effort ? { anthropic: { effort } } : undefined,
+		};
+	}
 	if (modelId.startsWith("anthropic/")) {
 		const budgets = { low: 2048, medium: 8192, high: 16_384 };
 		return {

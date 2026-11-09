@@ -10,7 +10,7 @@ import { z } from "zod";
 import {
 	AI_MODEL_MAX_RETRIES,
 	createModelFromId,
-	isAiGatewayConfigured,
+	isAiConfigured,
 } from "@databuddy/ai/config/models";
 import { getAILogger } from "@databuddy/ai/lib/ai-logger";
 import {
@@ -2763,8 +2763,8 @@ export async function runInsightAgent(
 				],
 			}
 		: originalInput;
-	if (!(options.model || isAiGatewayConfigured)) {
-		throw new Error("AI_GATEWAY_API_KEY is required");
+	if (!(options.model || isAiConfigured)) {
+		throw new Error("AI_GATEWAY_API_KEY or ANTHROPIC_API_KEY is required");
 	}
 	const isDefinition = ["goal", "funnel"].includes(input.signal.entity.type);
 	const isError =
