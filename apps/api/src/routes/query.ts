@@ -338,15 +338,13 @@ async function enforceQueryRateLimit(
 	requestId: string,
 	request: Request
 ): Promise<Response | null> {
-	if (readBooleanEnv("DATABUDDY_E2E_MODE")) {
+	if (readBooleanEnv("DATABUDDY_E2E_MODE") || ctx.apiKey) {
 		return null;
 	}
 
-	const principal = ctx.apiKey
-		? `apikey:${ctx.apiKey.id}`
-		: ctx.user
-			? `user:${ctx.user.id}`
-			: `anon:${getClientIp(request.headers) ?? "unknown"}`;
+	const principal = ctx.user
+		? `user:${ctx.user.id}`
+		: `anon:${getClientIp(request.headers) ?? "unknown"}`;
 	const effectiveLimit = ctx.isAuthenticated ? limit : Math.min(limit, 60);
 	const rl = await ratelimit(
 		`query:${endpoint}:${principal}`,

@@ -21,14 +21,8 @@ import { isAllowedApiOrigin, rejectInvalidMcpOrigin } from "@/http/cors";
 import { handleAppError } from "@/http/errors";
 import { getRequestId } from "@/http/request-id";
 import { AUTUMN_API_PREFIX } from "@/lib/autumn-mount";
-import { getResolvedAuth } from "@/lib/auth-wide-event";
 import { enrichApiWideEvent } from "@/lib/evlog-api";
 import { enrichRequestAuthWideEvent } from "@/middleware/auth-wide-event";
-import {
-	enforceApiKeyInFlightLimit,
-	enforceApiKeyRateLimit,
-	releaseApiKeyInFlight,
-} from "@/middleware/api-key-rate-limit";
 import {
 	handleAnonymousOrpcRequest,
 	handleAuthenticatedOrpcRequest,
@@ -99,12 +93,6 @@ function handleOpenApiRequest(orpcRequest: Request, context: OrpcContext) {
 }
 
 const app = new Elysia({ precompile: true })
-	.onAfterResponse(({ request }) => {
-		releaseApiKeyInFlight(request);
-	})
-	.onError(({ request }) => {
-		releaseApiKeyInFlight(request);
-	})
 	.use(
 		evlog({
 			enrich: enrichApiWideEvent,
@@ -113,11 +101,6 @@ const app = new Elysia({ precompile: true })
 	.onBeforeHandle(({ request, set }) => {
 		set.headers["X-Request-ID"] = getRequestId(request);
 	})
-	.onBeforeHandle(({ request, set }) =>
-		enforceApiKeyInFlightLimit(request, (name, value) => {
-			set.headers[name] = value;
-		})
-	)
 	.onBeforeHandle(({ request }) => enrichRequestAuthWideEvent(request))
 	.onRequest(({ request }) => rejectInvalidMcpOrigin(request))
 	.use(
@@ -133,20 +116,6 @@ const app = new Elysia({ precompile: true })
 			origin: isAllowedApiOrigin,
 		})
 	)
-	.onBeforeHandle(({ request, set }) => {
-		const resolvedAuth = getResolvedAuth(request.headers);
-		return enforceApiKeyRateLimit(
-			request,
-			(name, value) => {
-				set.headers[name] = value;
-			},
-			{
-				apiKey: resolvedAuth
-					? (resolvedAuth.apiKeyResult?.key ?? null)
-					: undefined,
-			}
-		);
-	})
 	.use(publicApi)
 	.use(health)
 	.use(discovery)

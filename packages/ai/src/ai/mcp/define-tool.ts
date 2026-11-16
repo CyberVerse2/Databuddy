@@ -327,7 +327,7 @@ export function defineMcpTool<S extends z.ZodTypeAny>(
 				}
 				const input = parseResult.data;
 
-				if (meta.ratelimit) {
+				if (meta.ratelimit && !ctx.apiKey) {
 					const id = rateLimitIdentifier(ctx, meta.name);
 					const limited = await ratelimit(
 						id,
